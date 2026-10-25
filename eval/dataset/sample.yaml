@@ -1,0 +1,25 @@
+# 评测集格式样例 —— 正式 50 题在 W5 构建；字段与 src/agent/schemas.py 的 EvalQuestion 对齐。
+# 约束：key_points 至少 3 条（覆盖率需要分辨率，schema 强制）；as_of_date 必填（复现锚点）；
+#       避免高时效题防腐烂，或明确记录信息时点。
+
+- question_id: e001
+  question: "Rust 1.85 稳定版主要引入了什么语言特性？"
+  type: fact_check
+  difficulty: 2
+  as_of_date: 2026-11-01
+  key_points:
+    - "Rust 2024 Edition 随 1.85 稳定"
+    - "async 闭包（async Fn trait）稳定化"
+    - "trait 相关改进"
+  notes: "等价表述可接受，如'2024 版次'"
+
+- question_id: e002
+  question: "对比 SQLite 与 DuckDB 在本地数据分析场景的适用性"
+  type: comparison
+  difficulty: 3
+  as_of_date: 2026-11-01
+  key_points:
+    - "行存 OLTP vs 列存 OLAP 的基本取舍"
+    - "聚合/分析查询的性能差异"
+    - "并发写入能力的差异"
+    - "各自典型适用场景"
