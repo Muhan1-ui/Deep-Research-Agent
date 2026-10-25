@@ -78,17 +78,14 @@ async def run_research_cli(question: str, concurrency: int, config: str = "A1") 
             print(f"      {f.error[:160]}")
     print(f"◆ {result.summary_line()}")
     print(f"◆ 明细: sqlite={settings.database_path}  trace=data/traces/{result.run_id}.jsonl")
-    print(f"◆ 示例 claim:")
-    for f in result.findings:
-        for c in f.claims[:1]:
-            print(f"      [{c.claim_id}] {c.text}")
-            print(f"        quote: {c.quote[:80]}")
-            print(f"        来源: {c.url}")
-            print(f"        锚点: {c.quote_locator}")
-            break
-        else:
-            continue
-        break
+    if result.report is not None:
+        print("\n========== 研究报告 ==========")
+        print(result.report.markdown)
+        print("========== 引用清单 ==========")
+        cited_claims = {c.claim_id: c for f in result.findings for c in f.claims}
+        for n, cid in result.report.citation_map.items():
+            c = cited_claims.get(cid)
+            print(f"[{n}] {c.url if c else cid}")
     return 0 if any(f.claims for f in result.findings) else 1
 
 
@@ -111,9 +108,6 @@ def main() -> None:
     args = parser.parse_args()
     if args.cmd == "ask":
         sys.exit(asyncio.run(run_ask(args.question, args.max_turns)))
-    elif args.config == "A2":
-        print("A2（Verifier）随 W4 加入，当前可用：A1", file=sys.stderr)
-        sys.exit(2)
     else:
         sys.exit(asyncio.run(run_research_cli(args.question, args.concurrency, args.config)))
 

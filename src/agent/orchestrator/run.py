@@ -17,6 +17,8 @@ from datetime import datetime
 
 from src.agent.agents.planner import SubQuery, make_plan
 from src.agent.agents.researcher import research_sub_query
+from src.agent.agents.verifier import detect_contradictions, verify_claims
+from src.agent.agents.writer import write_report
 from src.agent.config import Settings
 from src.agent.llm import LLMClient
 from src.agent.obs.trace import JsonlTrace
@@ -39,17 +41,19 @@ class ResearchRunResult:
     total_failures_degraded: int = 0  # DEGRADED 子任务数（抽取不全）
     tokens_in: int = 0
     tokens_out: int = 0
+    report: object | None = None  # ReportArtifact（A2 才有）
     elapsed_s: float = 0.0
 
     def summary_line(self) -> str:
         ok = sum(f.status is RunStatus.OK for f in self.findings)
+        cited = len(self.report.citation_map) if self.report else 0
         return (
             f"run={self.run_id} config={self.config} 子问题={len(self.plan)} "
             f"findings OK/DEGRADED/FAILED={ok}/"
             f"{sum(f.status is RunStatus.DEGRADED for f in self.findings)}/"
             f"{sum(f.status is RunStatus.FAILED for f in self.findings)} "
-            f"claims={self.total_claims} tokens={self.tokens_in}+{self.tokens_out} "
-            f"耗时={self.elapsed_s:.1f}s"
+            f"claims={self.total_claims} cited={cited} "
+            f"tokens={self.tokens_in}+{self.tokens_out} 耗时={self.elapsed_s:.1f}s"
         )
 
 
@@ -74,9 +78,10 @@ async def run_research(
     db: Database | None = None,
     max_concurrency: int = 4,
     config: str = "A1",
+    http_client=None,
 ) -> ResearchRunResult:
-    if config not in ("A1", "A2"):  # A2 随 W4 Verifier 生效；A0 走 ask 命令
-        raise SystemExit(f"未知配置 {config}（research 支持 A1，A2 随 W4 加入）")
+    if config not in ("A1", "A2"):  # A0 走 ask 命令
+        raise SystemExit(f"未知配置 {config}（research 支持 A1/A2）")
     settings = settings or Settings()
     if not settings.llm_api_key:
         raise SystemExit("缺少 LLM_API_KEY：复制 .env.example 为 .env 并填写")
@@ -86,7 +91,7 @@ async def run_research(
 
     run_id = new_run_id()
     trace = JsonlTrace(run_id, settings.trace_dir)
-    fetcher = PageFetcher(settings.pages_dir, on_page=db.save_page)
+    fetcher = PageFetcher(settings.pages_dir, client=http_client, on_page=db.save_page)
     registry = ToolRegistry()
     if settings.tavily_api_key:
         registry.register(build_search_tool(settings.tavily_api_key))
@@ -148,6 +153,34 @@ async def run_research(
         result.tokens_out = sum(f.tokens_out for f in result.findings)
         # 任一子任务非 OK（DEGRADED 或 FAILED）→ run 至少 DEGRADED
         status = _aggregate_status(result.findings)
+
+        # ---- A2：Verifier + 矛盾检测 + Writer（citation_map 程序化生成）---- #
+        if config == "A2":
+            all_claims = [c for f in result.findings for c in f.claims]
+            if all_claims:
+                verifier_llm = make_llm()
+                verifications = await verify_claims(
+                    verifier_llm, all_claims, checked_by=settings.llm_model)
+                contra = await detect_contradictions(
+                    verifier_llm, verifications, {c.claim_id: c for c in all_claims})
+                for v in verifications:
+                    v.contradiction_group = contra.get(v.claim_id)
+                trace.event(
+                    "verify_done", claims=len(all_claims),
+                    supported=sum(v.label.value == "supported" for v in verifications),
+                    partial=sum(v.label.value == "partial" for v in verifications),
+                    unsupported=sum(v.label.value == "unsupported" for v in verifications),
+                    contradiction_groups=len(set(contra.values())),
+                )
+                report = await write_report(
+                    make_llm(), question, result.findings, verifications)
+                await db.save_report(run_id, report)
+                result.report = report
+                trace.event("write_done", cited=len(report.citation_map),
+                            refusals=len(report.refusals))
+                if not report.citation_map and status is RunStatus.OK:
+                    status = RunStatus.DEGRADED  # 有论断但报告零引用：降级如实
+
         await db.finish_run(run_id, status)
         trace.event("run_done", status=status.value, claims=result.total_claims,
                     tokens_in=result.tokens_in, tokens_out=result.tokens_out)

@@ -2,6 +2,7 @@
 
 import asyncio
 import json
+import sqlite3
 from datetime import date, datetime, timezone
 
 from src.agent.claims import RawResearcherClaim, build_claims
@@ -34,6 +35,40 @@ def run(coro):
 
 
 class TestDatabase:
+    def test_migration_appends_columns_but_named_insert_stays_correct(self, tmp_path):
+        """★ 回归：老库（无 tokens 列）经 ALTER 迁移后，物理列序 ≠ 建表语句顺序。
+        位置参数 INSERT 会静默写串列（真实 run 抓到的现场）；
+        显式列名 INSERT 必须在任何列序下都写对位置。"""
+        db_path = tmp_path / "old.db"
+        conn = sqlite3.connect(db_path)  # 先造一个 W3 时期的老表结构
+        conn.executescript("""
+            CREATE TABLE findings (
+              run_id TEXT NOT NULL, sub_query_id TEXT NOT NULL, question TEXT NOT NULL,
+              status TEXT NOT NULL, search_queries TEXT NOT NULL DEFAULT '[]',
+              pages_fetched INTEGER NOT NULL DEFAULT 0,
+              claims TEXT NOT NULL DEFAULT '[]', error TEXT, elapsed_s REAL,
+              PRIMARY KEY (run_id, sub_query_id));
+        """)
+        conn.commit(); conn.close()
+
+        db = Database(db_path)  # 初始化触发 ALTER：tokens 列追加在表尾
+        finding = Finding(
+            sub_query_id="SQ1", question="q", status=RunStatus.OK,
+            search_queries=["q1"], pages_fetched=2, tokens_in=338, tokens_out=15,
+            claims=[Claim(
+                claim_id="r:SQ1:001", sub_query_id="SQ1", text="t", quote="q",
+                url="https://e.com", as_of_date=date(2026, 11, 2), extracted_by="m")],
+            elapsed_s=1.5,
+        )
+        run(db.save_run("rM", "q", "A1"))
+        run(db.save_finding("rM", finding))
+        row = db._conn.execute("SELECT * FROM findings WHERE run_id='rM'").fetchone()
+        db.close()
+        # 按列名读：每个值都落在自己的列里（修复前 tokens_out 位置是 elapsed）
+        assert row["tokens_in"] == 338 and row["tokens_out"] == 15
+        assert row["elapsed_s"] == 1.5
+        assert json.loads(row["claims"])[0]["claim_id"] == "r:SQ1:001"
+
     def test_wal_enabled(self, tmp_path):
         db = Database(tmp_path / "t.db")
         mode = db._conn.execute("PRAGMA journal_mode").fetchone()[0]

@@ -22,8 +22,14 @@ cp .env.example .env               # 填入 LLM_API_KEY（必需）和 TAVILY_AP
 # A0：单 Agent 消融基线（搜索→作答）
 python -m src.agent ask "Rust 2024 Edition 有什么变化？" --max-turns 8
 
-# 多 Agent 研究管线（W3）：规划 → 并行检索 → 句级锚定 claims → 落库
+# 多 Agent 研究管线：规划 → 并行检索 → 句级锚定 claims → 落库
 python -m src.agent research "MCP 协议的核心架构与生态现状" --concurrency 4
+
+# A2 = 完整系统（Verifier 逐条核验 + Writer 程序化引用报告）
+python -m src.agent research "SSE 与 WebSocket 在 LLM 流式输出的取舍" --config A2
+
+# Gradio 演示界面（浏览器打开 http://127.0.0.1:7860）
+python app/gradio_ui.py
 ```
 
 研究明细：`data/agent.db`（SQLite WAL）与 `data/traces/<run_id>.jsonl`（元数据 trace）；网页归档在 `data/pages/`。
@@ -36,6 +42,6 @@ python -m src.agent research "MCP 协议的核心架构与生态现状" --concur
 - [x] W1 原生 tool-calling loop + web_search，CLI 出带来源答案（loop 111 行）
 - [x] W2 fetch_page 片段管线：切段+BM25、双层归档、偏移锚定（四轮对抗审计修复见 docs/audit）
 - [x] W3 Planner + 并行 Researcher + SQLite WAL 落库 + JSONL trace（真实环境：6 子问题并行、54 claims、3 分钟）
-- [ ] W4 Verifier + Writer + Gradio demo（录演示视频）
+- [x] W4 Verifier + Writer（程序化 citation_map）+ A2 配置 + Gradio demo（真实环境：51 claims → 核验 35 supported → 报告引用 37）
 - [ ] W5 50 题评测集 + runner + 四层漏斗
 - [ ] W6 消融 A0/A1/A2 + 人工抽检

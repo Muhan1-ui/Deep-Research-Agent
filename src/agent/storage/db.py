@@ -64,6 +64,11 @@ CREATE TABLE IF NOT EXISTS snippets (
   published_at TEXT,
   PRIMARY KEY (page_id, char_start, char_end)
 );
+CREATE TABLE IF NOT EXISTS reports (
+  run_id   TEXT PRIMARY KEY,
+  markdown TEXT NOT NULL,
+  artifact TEXT NOT NULL   -- ReportArtifact.model_dump(mode="json")
+);
 """
 
 
@@ -95,7 +100,8 @@ class Database:
         聚合成功率必须 WHERE finished_at IS NOT NULL。"""
         async with self._write_lock:
             self._conn.execute(
-                "INSERT OR REPLACE INTO runs VALUES (?,?,?,?,?,NULL,NULL)",
+                "INSERT OR REPLACE INTO runs (run_id, question, config, status, created_at) "
+                "VALUES (?,?,?,?,?)",
                 (run_id, question, config, "running",
                  datetime.now().astimezone().isoformat()),
             )
@@ -110,9 +116,14 @@ class Database:
             self._conn.commit()
 
     async def save_finding(self, run_id: str, finding: Finding) -> None:
+        # 显式列名：老库经 ALTER 迁移后物理列序与建表语句不同，
+        # 位置参数 INSERT 会静默写串列（本日真实 run 抓到的现场）
         async with self._write_lock:
             self._conn.execute(
-                "INSERT OR REPLACE INTO findings VALUES (?,?,?,?,?,?,?,?,?,?,?)",
+                "INSERT OR REPLACE INTO findings "
+                "(run_id, sub_query_id, question, status, search_queries, pages_fetched, "
+                "tokens_in, tokens_out, claims, error, elapsed_s) "
+                "VALUES (?,?,?,?,?,?,?,?,?,?,?)",
                 (
                     run_id, finding.sub_query_id, finding.question,
                     finding.status.value,
@@ -129,7 +140,9 @@ class Database:
     async def save_page(self, page: FetchedPage) -> None:
         async with self._write_lock:
             self._conn.execute(
-                "INSERT OR REPLACE INTO pages VALUES (?,?,?,?,?,?,?,?,?)",
+                "INSERT OR REPLACE INTO pages "
+                "(page_id, url, title, fetched_at, via, html_path, text_path, text_chars, n_passages) "
+                "VALUES (?,?,?,?,?,?,?,?,?)",
                 (
                     page.page_id, page.url, page.title,
                     page.fetched_at.isoformat(), page.via,
@@ -139,13 +152,33 @@ class Database:
             )
             for s in page.snippets:
                 self._conn.execute(
-                    "INSERT OR REPLACE INTO snippets VALUES (?,?,?,?,?,?)",
+                    "INSERT OR REPLACE INTO snippets "
+                    "(page_id, char_start, char_end, passage, url, published_at) "
+                    "VALUES (?,?,?,?,?,?)",
                     (
                         s.page_id, s.char_start, s.char_end, s.passage,
                         s.url, s.published_at.isoformat() if s.published_at else None,
                     ),
                 )
             self._conn.commit()
+
+    async def save_report(self, run_id: str, report) -> None:
+        from src.agent.schemas import ReportArtifact
+        assert isinstance(report, ReportArtifact)
+        async with self._write_lock:
+            self._conn.execute(
+                "INSERT OR REPLACE INTO reports (run_id, markdown, artifact) VALUES (?,?,?)",
+                (run_id, report.markdown,
+                 json.dumps(report.model_dump(mode="json"), ensure_ascii=False)),
+            )
+            self._conn.commit()
+
+    def load_report(self, run_id: str):
+        from src.agent.schemas import ReportArtifact
+        row = self._conn.execute(
+            "SELECT artifact FROM reports WHERE run_id=?", (run_id,)
+        ).fetchone()
+        return ReportArtifact.model_validate(json.loads(row["artifact"])) if row else None
 
     # ------------------------------ 读（WAL 并发读，不加锁） ------------------------------ #
     def load_findings(self, run_id: str) -> list[Finding]:

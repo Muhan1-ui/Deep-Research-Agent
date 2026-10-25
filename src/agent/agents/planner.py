@@ -64,6 +64,21 @@ def extract_json_array(text: str) -> list:
     return data
 
 
+def extract_json_object(text: str) -> dict:
+    """从模型输出提取 JSON 对象（writer 用）。与数组版同一套容忍规则。"""
+    t = text.strip()
+    m = re.search(r"```(?:json)?\s*(.+?)```", t, re.S)
+    if m:
+        t = m.group(1).strip()
+    start, end = t.find("{"), t.rfind("}")
+    if start == -1 or end == -1 or end <= start:
+        raise ValueError("输出中未找到 JSON 对象")
+    data = json.loads(t[start : end + 1])
+    if not isinstance(data, dict):
+        raise ValueError("顶层不是 JSON 对象")
+    return data
+
+
 def parse_plan(text: str) -> list[PlannedItem]:
     data = extract_json_array(text)
     items, errors = [], []

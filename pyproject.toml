@@ -12,6 +12,7 @@ dependencies = [
     "rank-bm25>=0.2.10",   # W2 片段筛选
     "trafilatura>=1.8",    # 默认网页正文抽取（Jina Reader 仅作增强）
     "lxml_html_clean>=0.4",  # 新版 lxml 拆包：trafilatura→justext 依赖，缺了 import 即断
+    "gradio>=4",             # W4 demo UI（app/gradio_ui.py）
 ]
 
 [dependency-groups]
