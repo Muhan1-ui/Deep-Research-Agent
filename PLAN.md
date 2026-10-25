@@ -42,6 +42,7 @@
 |---|---|---|
 | 语言 | Python 3.12 + uv | |
 | LLM 接口 | OpenAI SDK（base_url 切换厂商） | 开发期用 GLM-4-Flash 免费额度；正式跑批用 DeepSeek |
+| 思考模式 | deepseek-v4-flash 默认开思考 → **默认 disabled**（LLM_THINKING） | ① tool-call 多轮必须回传 reasoning_content 否则 400（回传已实现，双保险防服务商校验不一致）② 思考 token 按输出计费，researcher 高频调用纯浪费 ③ 思考模式下 temperature 静默失效——judge 想要 temp=0 必须关思考 |
 | 模型分级 | researcher/verifier 用便宜模型，planner/writer 用强模型 | 降本一个数量级，有数字支撑 |
 | **评测 judge** | **与 Verifier/Writer 不同厂商**（如 GLM 判 DeepSeek 系统） | 消同源偏差，一句话的面试加分 |
 | 搜索 | Tavily（抽象层可切 SearXNG/博查） | 配额警戒见 §8；搜索结果全量缓存 |
@@ -172,7 +173,7 @@ deep-research-agent/
 | W1 | 10/27–11/2 | 原生 tool-calling loop + web_search | CLI 出带来源答案；loop <200 行；A0 基线模式埋好开关 |
 | W2 | 11/3–11/9 | loop 加固 + fetch_page **片段筛选** | 注入工具失败可自恢复；每页只留 1~3 片段；SQLite 开 WAL |
 | W3 | 11/10–11/16 | Planner + Researcher 并行 + 落库 + JSONL trace | 一题自动拆 ≥3 子问题并行；状态全程可查 |
-| W4 | 11/17–11/23 | Verifier + Writer + **Gradio demo** | 端到端出带引用报告；**录 2 分钟演示视频**；博客 1 初稿《我为什么不用 LangGraph，自己写了 200 行 Agent Loop》 |
+| W4 | 11/17–11/23 | Verifier + Writer + **Gradio demo** | 端到端出带引用报告；**citation_map 由程序生成**（唯一真源，正文 [n] 不作数，见 docs/audit）；**录 2 分钟演示视频**；博客 1 初稿《我为什么不用 LangGraph，自己写了 200 行 Agent Loop》 |
 | W5 | 11/24–11/30 | 50 题 + runner + 漏斗指标 | `python -m eval.runner` 一条命令出报告 |
 | W6 | 12/1–12/7 | 消融 A0/A1/A2 + 人工抽检 | 对比表（含覆盖率与 claim 数）；**博客 2 发布**《引用忠实度怎么机器评估》 |
 
