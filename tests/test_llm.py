@@ -98,3 +98,125 @@ class TestRetryClassification:
         assert result.tool_calls[0].name == "web_search"
         assert result.tool_calls[0].arguments_raw == '{"query": "mcp"}'
         assert result.tool_calls[0].id == "t9"
+
+
+class TestThinkingModeParams:
+    """思考模式相关的透传行为：deepseek-v4-flash 默认开思考，
+    tool-call 多轮缺 reasoning_content 回传会 400，思考模式下 temperature 静默失效。"""
+
+    @staticmethod
+    def capturing_llm(settings_kwargs=None):
+        captured = []
+
+        class C:
+            async def create(self, **kw):
+                captured.append(kw)
+                return ok_response()
+
+        from openai import NOT_GIVEN as NG  # 与实现同源的哨兵比较
+
+        client = LLMClient(
+            Settings(llm_api_key="k", llm_model="fake", **(settings_kwargs or {})),
+            client=SimpleNamespace(chat=SimpleNamespace(completions=C())),
+        )
+        return client, captured, NG
+
+    def test_thinking_disabled_sent_by_default(self):
+        client, captured, _ = self.capturing_llm()
+        asyncio.run(client.complete([{"role": "user", "content": "hi"}]))
+        assert captured[0]["extra_body"] == {"thinking": {"type": "disabled"}}
+
+    def test_thinking_auto_omits_extra_body(self):
+        client, captured, _ = self.capturing_llm({"llm_thinking": "auto"})
+        asyncio.run(client.complete([{"role": "user", "content": "hi"}]))
+        # None 的语义 = SDK 省略该参数（extra_json 只判 None；NOT_GIVEN 会炸，见线体测试）
+        assert captured[0]["extra_body"] is None
+
+    def test_temperature_passthrough_and_default(self):
+        client, captured, NG = self.capturing_llm()
+        asyncio.run(client.complete([{"role": "user", "content": "hi"}], temperature=0.0))
+        assert captured[0]["temperature"] == 0.0
+        asyncio.run(client.complete([{"role": "user", "content": "hi"}]))
+        assert captured[1]["temperature"] is NG
+
+    def test_extra_body_override_beats_settings(self):
+        client, captured, _ = self.capturing_llm()
+        asyncio.run(
+            client.complete([{"role": "user", "content": "hi"}], extra_body={"foo": 1})
+        )
+        assert captured[0]["extra_body"] == {"foo": 1}
+
+    def test_reasoning_content_captured(self):
+        msg = SimpleNamespace(content="答", tool_calls=None, reasoning_content="思考中")
+        resp = SimpleNamespace(
+            choices=[SimpleNamespace(message=msg)],
+            usage=SimpleNamespace(prompt_tokens=1, completion_tokens=2),
+            model="fake",
+        )
+        client, _ = make_llm([resp])
+        result = asyncio.run(client.complete([{"role": "user", "content": "hi"}]))
+        assert result.reasoning_content == "思考中"
+
+
+def sdk_wire_client(bodies: list) -> "openai.AsyncOpenAI":
+    """真实 openai SDK + MockTransport：截获真正发出的 HTTP 请求体。
+
+    假 completions 对象只看得到 kwargs，进不了 SDK 的 body 组装——
+    auto bug（NOT_GIVEN 走 extra_json 不经 strip_not_given → TypeError）
+    正是被假对象盖住的。这层测试专门钉死"参数拼装 × 真实 SDK"接触面。
+    """
+    import json as jsonlib
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        bodies.append(jsonlib.loads(request.content.decode("utf-8")))
+        return httpx.Response(200, json={
+            "id": "x", "object": "chat.completion", "created": 0, "model": "fake",
+            "choices": [{"index": 0, "finish_reason": "stop",
+                         "message": {"role": "assistant", "content": "ok"}}],
+            "usage": {"prompt_tokens": 1, "completion_tokens": 1, "total_tokens": 2},
+        })
+
+    return openai.AsyncOpenAI(
+        api_key="k", base_url="https://api.test/v1", max_retries=0,
+        http_client=httpx.AsyncClient(transport=httpx.MockTransport(handler)),
+    )
+
+
+class TestWireBodyAssembly:
+    """经真实 SDK 组装出的请求体（线上字节），不是我们以为会发出的参数。"""
+
+    def _run(self, settings_kwargs=None, **complete_kw):
+        bodies: list = []
+        client = LLMClient(
+            Settings(llm_api_key="k", llm_model="fake", **(settings_kwargs or {})),
+            client=sdk_wire_client(bodies),
+        )
+        result = asyncio.run(client.complete([{"role": "user", "content": "hi"}], **complete_kw))
+        return bodies[0], result
+
+    def test_disabled_adds_thinking_off(self):
+        body, result = self._run()
+        assert body["thinking"] == {"type": "disabled"}
+        assert result.content == "ok"
+
+    def test_auto_omits_thinking_entirely(self):
+        # 修复前：thinking_body 返回 None → `None or NOT_GIVEN` → extra_body=NOT_GIVEN
+        # → SDK 的 extra_json 只判 None 不判 NOT_GIVEN → TypeError（真实调用必炸）
+        body, _ = self._run({"llm_thinking": "auto"})
+        assert "thinking" not in body
+
+    def test_enabled(self):
+        body, _ = self._run({"llm_thinking": "enabled"})
+        assert body["thinking"] == {"type": "enabled"}
+
+    def test_extra_body_override_and_temperature_reach_the_wire(self):
+        body, _ = self._run(temperature=0.0, extra_body={"foo": 1})
+        assert body["foo"] == 1
+        assert "thinking" not in body
+        assert body["temperature"] == 0.0
+
+    def test_temperature_absent_by_default_on_the_wire(self):
+        # temperature 是类型化参数：NOT_GIVEN 会被 strip_not_given 正确剥掉
+        # （与 extra_body 的不对称正是 auto bug 的根源）
+        body, _ = self._run()
+        assert "temperature" not in body

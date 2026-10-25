@@ -99,6 +99,10 @@ class AgentLoop:
         """把模型回复原样写回 messages（含 tool_calls 原始结构），保证下一轮
         请求的上下文与厂商 API 约定完全一致。"""
         msg: dict = {"role": "assistant", "content": llm_out.content or ""}
+        # DeepSeek 思考模式 + tools：后续请求必须完整回传 reasoning_content，缺失 400。
+        # is not None 而非真值判断：厂商返回空串时字段仍在协议意义上"存在"，丢弃可能 400
+        if llm_out.reasoning_content is not None:
+            msg["reasoning_content"] = llm_out.reasoning_content
         if llm_out.tool_calls:
             msg["tool_calls"] = [
                 {

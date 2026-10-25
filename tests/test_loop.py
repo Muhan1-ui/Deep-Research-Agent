@@ -198,3 +198,39 @@ class TestGuardrails:
         assert result.stop_reason == STOP_MAX_TURNS
         assert result.answer is None
         assert result.turns == 3
+
+
+class TestReasoningPassthrough:
+    def test_reasoning_content_roundtrips_into_assistant_message(self):
+        """DeepSeek 思考模式 + tools：带 tool_calls 的 assistant 消息必须回传
+        reasoning_content，否则下一轮请求 400。字段存在就必须带上（双保险）。"""
+        llm = FakeLLM([
+            LLMResult(content=None, reasoning_content="分析中……",
+                      tool_calls=[tool_call("t1", "echo")]),
+            final("ok"),
+        ])
+        result = run(AgentLoop(llm, make_registry(echo_tool())).run("s", "u"))
+        asst = [m for m in result.messages
+                if m["role"] == "assistant" and m.get("tool_calls")]
+        assert asst[0]["reasoning_content"] == "分析中……"
+
+    def test_empty_string_reasoning_still_roundtrips(self):
+        # 厂商返回空串：字段在协议意义上存在，真值判断会漏传 → 潜在 400
+        llm = FakeLLM([
+            LLMResult(content=None, reasoning_content="", tool_calls=[tool_call("t1", "echo")]),
+            final("ok"),
+        ])
+        result = run(AgentLoop(llm, make_registry(echo_tool())).run("s", "u"))
+        asst = [m for m in result.messages
+                if m["role"] == "assistant" and m.get("tool_calls")]
+        assert asst[0]["reasoning_content"] == ""
+
+    def test_no_reasoning_field_when_absent(self):
+        llm = FakeLLM([
+            LLMResult(content=None, tool_calls=[tool_call("t1", "echo")]),
+            final("ok"),
+        ])
+        result = run(AgentLoop(llm, make_registry(echo_tool())).run("s", "u"))
+        asst = [m for m in result.messages
+                if m["role"] == "assistant" and m.get("tool_calls")]
+        assert "reasoning_content" not in asst[0]
