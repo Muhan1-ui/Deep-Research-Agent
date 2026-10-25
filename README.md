@@ -23,6 +23,8 @@ python -m src.agent "Rust 2024 Edition 有什么变化？" --max-turns 8
 
 A0 = 单 Agent 消融基线（W6 用）；答案打到 stdout，运行统计打到 stderr。
 
+> 抓取合规：fetch_page 为低频研究用途直连抓取，未实现 robots.txt 强制拦截；使用时请遵守目标站点的服务条款与访问频率约束。
+
 ## 路线图
 
 - [x] W0 三套 schema 定稿（claim / findings / eval record）

@@ -14,12 +14,14 @@ from src.agent.config import Settings
 from src.agent.llm import FatalLLMError, LLMClient, RetryableLLMError
 from src.agent.runtime.loop import AgentLoop
 from src.agent.tools.base import ToolRegistry
+from src.agent.tools.fetch import build_fetch_tool
 from src.agent.tools.search import build_search_tool
 
 SYSTEM_PROMPT = """你是一个严谨的研究助手，当前运行在单 Agent 模式。
 规则：
-1. 回答事实性/时效性问题前，必须先调用 web_search（可以多次、可以改写查询词）；
-2. 只依据搜索结果作答，不编造；检索不到的信息要明说"未检索到"；
+1. 回答事实性/时效性问题前，必须先调用 web_search（可多次、可改写查询词）；
+   对搜索结果中信息量大的来源 URL，再调用 fetch_page 深读相关片段；
+2. 只依据搜索/阅读到的内容作答，不编造；检索不到的信息要明说"未检索到"；
 3. 回答用中文、简洁分点；
 4. 末尾附"来源"清单（标题 + URL），只列真正用到的。"""
 
@@ -28,6 +30,7 @@ def build_registry(settings: Settings) -> ToolRegistry:
     registry = ToolRegistry()
     if settings.tavily_api_key:
         registry.register(build_search_tool(settings.tavily_api_key))
+    registry.register(build_fetch_tool(settings.pages_dir))  # fetch_page 无需任何 key
     return registry
 
 

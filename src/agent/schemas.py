@@ -69,7 +69,7 @@ MIN_FAITHFULNESS = 0.85
 # --------------------------------------------------------------------------- #
 # 基类与枚举
 # --------------------------------------------------------------------------- #
-class _Contract(BaseModel):
+class Contract(BaseModel):
     """全部契约模型的基类：未声明字段一律报错。
 
     契约要比业务代码更"硬"。一旦各处能随手塞字段，W3 的落库、W5 的打分、
@@ -159,7 +159,7 @@ class RunStatus(str, Enum):
 # --------------------------------------------------------------------------- #
 # 一、claim / findings（生产链路）
 # --------------------------------------------------------------------------- #
-class Claim(_Contract):
+class Claim(Contract):
     """一条可验证的论断 —— 整个系统的原子单位。
 
     `quote` 字段是 v1 就定下的关键决策：researcher 传原文而非摘要，
@@ -210,7 +210,7 @@ class Claim(_Contract):
         return v.strip()
 
 
-class Finding(_Contract):
+class Finding(Contract):
     """一个子问题的检索与抽取结果（researcher 的产出）。
 
     刻意不含 verifier 结论：验证是独立阶段，混进来会让"A1 无 Verifier"
@@ -241,7 +241,7 @@ class Finding(_Contract):
         return self
 
 
-class Verification(_Contract):
+class Verification(Contract):
     """Verifier 对单条 claim 的核对结论。"""
 
     claim_id: str
@@ -270,12 +270,12 @@ class Verification(_Contract):
 # --------------------------------------------------------------------------- #
 # 二、报告产物
 # --------------------------------------------------------------------------- #
-class ReportSection(_Contract):
+class ReportSection(Contract):
     heading: str
     body: str = Field(description="含内联 [n] 引用标记。引用编号与 citation_map 对齐。")
 
 
-class ReportArtifact(_Contract):
+class ReportArtifact(Contract):
     """Writer 产出。引用关系单独成表，而不是把 [n] 直接塞进 claim 上。
 
     理由：引用编号是**报告内**的局部编号，同一条 claim 在两次报告里编号不同，
@@ -331,7 +331,7 @@ class ReportArtifact(_Contract):
 # --------------------------------------------------------------------------- #
 # 三、评测记录（eval record）
 # --------------------------------------------------------------------------- #
-class ClaimJudgment(_Contract):
+class ClaimJudgment(Contract):
     """单条 claim 的 judge 判定（+ 可选的人工判定）。
 
     judge 与 human 放在同一个对象里，是为了让"一致率 / 混淆矩阵"不需要
@@ -358,7 +358,7 @@ class ClaimJudgment(_Contract):
         return self.judge_label is self.human_label
 
 
-class KeyPointHit(_Contract):
+class KeyPointHit(Contract):
     """一条参考要点是否被触达 / 被写进报告。
 
     检索命中与报告覆盖分开记，是为了让漏斗①和覆盖率用同一份数据源——
@@ -386,7 +386,7 @@ class KeyPointHit(_Contract):
         return self
 
 
-class FunnelMetrics(_Contract):
+class FunnelMetrics(Contract):
     """四层漏斗（推导视图，由 EvalRecord.funnel() 产出，不单独落库）。"""
 
     retrieval_hits: int = Field(description="① 检索命中的 key_point 数")
@@ -427,7 +427,7 @@ class FunnelMetrics(_Contract):
 # --------------------------------------------------------------------------- #
 # 四、评测集题目
 # --------------------------------------------------------------------------- #
-class EvalQuestion(_Contract):
+class EvalQuestion(Contract):
     """评测集单题。既有 `as_of_date` 也有 `key_points`：前者防腐烂，后者算覆盖率。"""
 
     question_id: str
@@ -442,7 +442,7 @@ class EvalQuestion(_Contract):
 # --------------------------------------------------------------------------- #
 # 五、一次评测运行
 # --------------------------------------------------------------------------- #
-class EvalRecord(_Contract):
+class EvalRecord(Contract):
     """一次 (题目 × 消融配置) 的完整记录 —— 报告里所有数字的唯一来源。
 
     `code_version / prompt_version / model_snapshots` 三者合起来构成复现三元组。
@@ -679,7 +679,7 @@ KAPPA_NOTE = (
 )
 
 
-class AgreementStats(_Contract):
+class AgreementStats(Contract):
     """人类 vs judge 的一致性汇总。n 小的时候不要看 kappa，看混淆矩阵。"""
 
     n: int = Field(description="参与比对的人工样本数（有 human_label 的条数）。")
