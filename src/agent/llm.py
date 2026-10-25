@@ -81,6 +81,7 @@ class LLMClient:
         sleep: Callable[[float], Awaitable[None]] = asyncio.sleep,
     ):
         self._s = settings
+        self._owns_client = client is None  # 注入的 client 归调用方管（测试）
         self._client = client or openai.AsyncOpenAI(
             api_key=settings.llm_api_key,
             base_url=settings.llm_base_url,
@@ -92,6 +93,12 @@ class LLMClient:
             timeout=httpx.Timeout(settings.llm_timeout_s, connect=10.0),
         )
         self._sleep = sleep  # 注入以便测试瞬时回放退避序列
+
+    async def aclose(self) -> None:
+        """关闭自建的底层连接池；注入的 client 不归我们管。批跑防 fd 耗尽。
+        注意 openai SDK 的方法是 close()（不是 httpx 风格的 aclose()）。"""
+        if self._owns_client:
+            await self._client.close()
 
     async def complete(
         self,

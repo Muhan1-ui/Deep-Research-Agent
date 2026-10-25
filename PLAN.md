@@ -174,7 +174,7 @@ deep-research-agent/
 | W2 | 11/3–11/9 | loop 加固 + fetch_page **片段筛选** | 注入工具失败可自恢复；每页只留 1~3 片段；SQLite 开 WAL |
 | W3 | 11/10–11/16 | Planner + Researcher 并行 + 落库 + JSONL trace | 一题自动拆 ≥3 子问题并行；状态全程可查 |
 | W4 | 11/17–11/23 | Verifier + Writer + **Gradio demo** | 端到端出带引用报告；**citation_map 由程序生成**（唯一真源，正文 [n] 不作数，见 docs/audit）；**录 2 分钟演示视频**；博客 1 初稿《我为什么不用 LangGraph，自己写了 200 行 Agent Loop》 |
-| W5 | 11/24–11/30 | 50 题 + runner + 漏斗指标 | `python -m eval.runner` 一条命令出报告 |
+| W5 | 11/24–11/30 | 50 题 + runner + 漏斗指标 | `python -m eval.runner` 一条命令出报告（W3 提前完成后，领先的时间优先预支给本题集的人工校对——12/14 数字的瓶颈在人不在码） |
 | W6 | 12/1–12/7 | 消融 A0/A1/A2 + 人工抽检 | 对比表（含覆盖率与 claim 数）；**博客 2 发布**《引用忠实度怎么机器评估》 |
 
 **W4 末手里就有可演示的东西**——被毕设挤占、面试提前来，都不慌。

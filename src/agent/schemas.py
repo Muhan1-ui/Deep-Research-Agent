@@ -226,6 +226,8 @@ class Finding(Contract):
         "检索层出问题时要靠它复盘，不记就只能怪'模型不行'。",
     )
     pages_fetched: int = Field(default=0, description="抓取页数 → 成本与耗尽情况。")
+    tokens_in: int = Field(default=0, description="该子任务 LLM 输入 token（含修复轮）——W5/W7 成本指标的数据源。")
+    tokens_out: int = Field(default=0, description="该子任务 LLM 输出 token（含修复轮）。")
     claims: list[Claim] = Field(default_factory=list)
     error: str | None = Field(default=None, description="降级/失败原因，直接进 trace 与失败归因。")
     elapsed_s: float | None = Field(default=None, description="并行调度时找长尾子任务用。")

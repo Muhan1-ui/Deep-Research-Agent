@@ -58,12 +58,13 @@ async def run_ask(question: str, max_turns: int) -> int:
     return 0
 
 
-async def run_research_cli(question: str, concurrency: int) -> int:
+async def run_research_cli(question: str, concurrency: int, config: str = "A1") -> int:
     from src.agent.orchestrator.run import run_research
     from src.agent.schemas import RunStatus
 
     settings = Settings()
-    result = await run_research(question, settings=settings, max_concurrency=concurrency)
+    result = await run_research(
+        question, settings=settings, max_concurrency=concurrency, config=config)
     print(f"◆ 研究计划（{len(result.plan)} 个子问题）:")
     for s in result.plan:
         print(f"  {s.sub_query_id}: {s.question}")
@@ -101,15 +102,20 @@ def main() -> None:
     p_ask.add_argument("question")
     p_ask.add_argument("--max-turns", type=int, default=8)
 
-    p_res = sub.add_parser("research", help="多 Agent 管线：规划→并行检索→落库（W3）")
+    p_res = sub.add_parser("research", help="多 Agent 管线：规划→并行检索→落库")
     p_res.add_argument("question")
     p_res.add_argument("--concurrency", type=int, default=4)
+    p_res.add_argument("--config", default="A1", choices=["A1", "A2"],
+                       help="消融配置（A2 = Verifier，随 W4 生效）")
 
     args = parser.parse_args()
     if args.cmd == "ask":
         sys.exit(asyncio.run(run_ask(args.question, args.max_turns)))
+    elif args.config == "A2":
+        print("A2（Verifier）随 W4 加入，当前可用：A1", file=sys.stderr)
+        sys.exit(2)
     else:
-        sys.exit(asyncio.run(run_research_cli(args.question, args.concurrency)))
+        sys.exit(asyncio.run(run_research_cli(args.question, args.concurrency, args.config)))
 
 
 if __name__ == "__main__":

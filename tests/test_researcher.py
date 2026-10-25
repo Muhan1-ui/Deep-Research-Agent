@@ -38,7 +38,7 @@ def claims_from_last_tool_message(messages):
     quote = passage[:40]
     return LLMResult(content=json.dumps(
         [{"text": "MCP 是开放标准", "quote": quote, "snippet_id": sid}],
-        ensure_ascii=False))
+        ensure_ascii=False), usage_in=10, usage_out=1)
 
 
 def build_registry(tmp_path, fetcher: PageFetcher) -> ToolRegistry:
@@ -115,6 +115,30 @@ class TestResearchSubQuery:
         assert finding.status is RunStatus.OK, finding.error
         assert len(finding.claims) == 1
         assert finding.claims[0].claim_id == "runX:SQ1:001"  # 位置稳定，不因修复错位
+
+    def test_tokens_and_usage_accumulate_across_repair(self, tmp_path):
+        """修复轮是全新 AgentLoop（检索可能重做）——用量与工具统计必须
+        跨全部轮次累计，只统计胜出轮会系统性低估成本（第五轮 P3）。"""
+        fetcher = PageFetcher(tmp_path, client=mocked_client())
+        registry = build_registry(tmp_path, fetcher)
+        bad = json.dumps([{"text": "编造", "quote": "不存在的引文", "snippet_id": "ghost:1-2"}])
+        llm = SmartFakeLLM([
+            LLMResult(content=bad, usage_in=50, usage_out=5),                # 首轮：坏输出
+            LLMResult(content=None, usage_in=30, usage_out=3,                # 修复轮：重新检索
+                      tool_calls=[tc("r1", "web_search", '{"query": "MCP"}')]),
+            LLMResult(content=None, usage_in=20, usage_out=2,
+                      tool_calls=[tc("r2", "fetch_page", json.dumps({"url": URL, "query": "MCP"}))]),
+            claims_from_last_tool_message,                                   # usage 10/1
+        ])
+        sub = SubQuery(sub_query_id="SQ1", question="MCP 是什么")
+        finding = run(research_sub_query(
+            llm, registry, "runX", sub, resolver=fetcher, extracted_by="m"))
+
+        assert finding.status is RunStatus.OK, finding.error
+        assert finding.tokens_in == 50 + 30 + 20 + 10
+        assert finding.tokens_out == 5 + 3 + 2 + 1
+        assert finding.search_queries == ["MCP"]
+        assert finding.pages_fetched == 1
 
     def test_all_failed_gives_failed_finding(self, tmp_path):
         fetcher = PageFetcher(tmp_path, client=mocked_client())

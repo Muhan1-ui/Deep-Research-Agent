@@ -87,6 +87,20 @@ def _format_failures(failures: list[ResolveFailure]) -> str:
     )
 
 
+def _merged_tool_usage(results: list) -> tuple[list[str], int]:
+    """跨全部轮次（含修复轮）合并统计：query 去重保序，fetch 累加。
+    修复轮是全新 AgentLoop，检索可能重做一遍——只统计胜出轮会系统性低估成本。"""
+    queries: list[str] = []
+    fetches = 0
+    for r in results:
+        q, n = count_tool_usage(r.messages)
+        for x in q:
+            if x not in queries:
+                queries.append(x)
+        fetches += n
+    return queries, fetches
+
+
 async def research_sub_query(
     llm,
     registry: ToolRegistry,
@@ -98,8 +112,16 @@ async def research_sub_query(
     allow_repair: bool = True,
 ) -> Finding:
     t0 = time.perf_counter()
+    # planner 的 search_hints 在这里接通：拼进首轮消息（要么用要么删，不留死字段）
+    user_msg = sub.question
+    if sub.search_hints:
+        user_msg += "\n建议搜索词：" + "、".join(sub.search_hints)
+
     loop = AgentLoop(llm, registry, max_turns=max_turns)
-    result = await loop.run(RESEARCHER_PROMPT, sub.question)
+    result = await loop.run(RESEARCHER_PROMPT, user_msg)
+    rounds = [result]  # 用量与工具统计跨所有轮累计，不管哪轮的输出被采纳
+    tokens_in = result.usage_in
+    tokens_out = result.usage_out
 
     raws, parse_failures = parse_raw_claims(result.answer)
     built: ClaimBuildResult = build_claims(run_id, sub.sub_query_id, raws, resolver, extracted_by)
@@ -114,6 +136,9 @@ async def research_sub_query(
             "请修正后重新输出完整 JSON 数组（包括之前正确的项，保持顺序）。只输出 JSON。"
         )
         r2 = await AgentLoop(llm, registry, max_turns=max_turns).run(RESEARCHER_PROMPT, repair_user)
+        rounds.append(r2)
+        tokens_in += r2.usage_in
+        tokens_out += r2.usage_out
         if r2.answer:
             raws2, pf2 = parse_raw_claims(r2.answer)
             built2 = build_claims(run_id, sub.sub_query_id, raws2, resolver, extracted_by)
@@ -122,7 +147,7 @@ async def research_sub_query(
                 built, failures = built2, f2
                 result = r2
 
-    queries, fetches = count_tool_usage(result.messages)
+    queries, fetches = _merged_tool_usage(rounds)
     if not built.claims:
         status = RunStatus.FAILED
         error = f"stop={result.stop_reason}; failures={len(failures)}"
@@ -139,6 +164,8 @@ async def research_sub_query(
         status=status,
         search_queries=queries,
         pages_fetched=fetches,
+        tokens_in=tokens_in,
+        tokens_out=tokens_out,
         claims=built.claims,
         error=error,
         elapsed_s=round(time.perf_counter() - t0, 3),

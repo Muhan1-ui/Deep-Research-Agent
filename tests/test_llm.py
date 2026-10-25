@@ -158,6 +158,28 @@ class TestThinkingModeParams:
         assert result.reasoning_content == "思考中"
 
 
+class TestClientLifecycle:
+    """第五轮 P2：每个 worker 一个 LLMClient = 一个连接池，批跑会 fd 耗尽。"""
+
+    def test_own_client_closed_on_aclose(self):
+        client = LLMClient(Settings(llm_api_key="k", llm_base_url="https://api.test/v1"))
+        assert client._owns_client
+        asyncio.run(client.aclose())  # 自建 → 真关闭，不炸不漏
+
+    def test_injected_client_not_ours_to_close(self):
+        class Injected:
+            closed = False
+
+            async def aclose(self):
+                Injected.closed = True
+
+        injected = Injected()
+        client = LLMClient(Settings(llm_api_key="k"), client=injected)
+        assert not client._owns_client
+        asyncio.run(client.aclose())
+        assert Injected.closed is False  # 注入方负责，我们不越权关闭
+
+
 def sdk_wire_client(bodies: list) -> "openai.AsyncOpenAI":
     """真实 openai SDK + MockTransport：截获真正发出的 HTTP 请求体。
 

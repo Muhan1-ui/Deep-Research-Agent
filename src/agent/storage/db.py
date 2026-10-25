@@ -37,6 +37,8 @@ CREATE TABLE IF NOT EXISTS findings (
   status        TEXT NOT NULL,
   search_queries TEXT NOT NULL DEFAULT '[]',  -- json array
   pages_fetched INTEGER NOT NULL DEFAULT 0,
+  tokens_in     INTEGER NOT NULL DEFAULT 0,
+  tokens_out    INTEGER NOT NULL DEFAULT 0,
   claims        TEXT NOT NULL DEFAULT '[]',   -- json array（Claim.model_dump 列表）
   error         TEXT,
   elapsed_s     REAL,
@@ -74,15 +76,27 @@ class Database:
         self._conn.execute("PRAGMA journal_mode=WAL")
         self._conn.execute("PRAGMA synchronous=NORMAL")
         self._conn.executescript(_SCHEMA)
+        # 轻量迁移：老库补列（第二执行思维：已有数据不能因升级报废）
+        for stmt in (
+            "ALTER TABLE findings ADD COLUMN tokens_in INTEGER NOT NULL DEFAULT 0",
+            "ALTER TABLE findings ADD COLUMN tokens_out INTEGER NOT NULL DEFAULT 0",
+        ):
+            try:
+                self._conn.execute(stmt)
+            except sqlite3.OperationalError:
+                pass  # 列已存在
         self._conn.commit()
         self._write_lock = asyncio.Lock()  # 单写者：所有写操作穿这把锁
 
     # ------------------------------ 写 ------------------------------ #
     async def save_run(self, run_id: str, question: str, config: str) -> None:
+        """初始状态写 'running'（DB 层字符串，不在 RunStatus 枚举里）：
+        进程被杀时这行永远停在 running 而不是伪装成 ok——
+        聚合成功率必须 WHERE finished_at IS NOT NULL。"""
         async with self._write_lock:
             self._conn.execute(
                 "INSERT OR REPLACE INTO runs VALUES (?,?,?,?,?,NULL,NULL)",
-                (run_id, question, config, RunStatus.OK.value,
+                (run_id, question, config, "running",
                  datetime.now().astimezone().isoformat()),
             )
             self._conn.commit()
@@ -98,12 +112,13 @@ class Database:
     async def save_finding(self, run_id: str, finding: Finding) -> None:
         async with self._write_lock:
             self._conn.execute(
-                "INSERT OR REPLACE INTO findings VALUES (?,?,?,?,?,?,?,?,?)",
+                "INSERT OR REPLACE INTO findings VALUES (?,?,?,?,?,?,?,?,?,?,?)",
                 (
                     run_id, finding.sub_query_id, finding.question,
                     finding.status.value,
                     json.dumps(finding.search_queries, ensure_ascii=False),
                     finding.pages_fetched,
+                    finding.tokens_in, finding.tokens_out,
                     json.dumps([c.model_dump(mode="json") for c in finding.claims],
                                ensure_ascii=False),
                     finding.error, finding.elapsed_s,
@@ -145,6 +160,7 @@ class Database:
                 status=RunStatus(r["status"]),
                 search_queries=json.loads(r["search_queries"]),
                 pages_fetched=r["pages_fetched"],
+                tokens_in=r["tokens_in"], tokens_out=r["tokens_out"],
                 claims=[Claim.model_validate(c) for c in json.loads(r["claims"])],
                 error=r["error"], elapsed_s=r["elapsed_s"],
             ))

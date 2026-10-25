@@ -65,3 +65,20 @@
 bug 全在"第二次执行"里（第二次 run、重启后的进程、第二次出现、换一种
 归一化）。对策：新增用例必须覆盖对应维度（双 run / 空索引 / 重复引文 /
 空白折叠），而不是同一形状再测一遍。
+
+## 第五轮（W3 编排层，2026-10-26）
+
+| # | 探针 | 级别 | 状态 | 落点 |
+|---|---|---|---|---|
+| run 状态漏 FAILED | `total_failures_degraded` 只数 DEGRADED："4 挂 1"落库为 ok，成功率虚高 | **P1** | ✅ | 提取 `_aggregate_status()`：任一子任务非 OK → 至少 DEGRADED；单测锁定 |
+| 崩溃残留 ok | save_run 即写 ok，进程被杀后该行永远"成功" | **P1** | ✅ | 初始状态 'running'（DB 层字符串）；异常路径 finish_run(FAILED)；被杀行停在 running——聚合必须 `finished_at IS NOT NULL` |
+| config 硬编码 | 落库永远 "A1"，消融三组会全归 A1 且不报错 | **P1** | ✅ | run_research(config=) 参数化 + CLI 透传 + 非法值拒绝 |
+| token 用量断链 | LoopResult.usage 无人传递，成本指标数据源为空 | P2 | ✅ | Finding 增 tokens_in/out；researcher 跨修复轮累计 → trace sub_done → DB（含老库 ALTER 迁移） |
+| LLM client 泄漏 | 每 worker 一个 AsyncOpenAI 连接池永不关闭 | P2 | ✅ | LLMClient.aclose()（注入方管注入的）；编排层登记统一关闭 |
+| search_hints 死字段 | 生成→存储→无人使用 | P2 | ✅ | 拼进 researcher 首轮消息 |
+| 修复轮用量漏计 | 只统计胜出轮，检索重做被低估 | P3 | ✅ | 用量与工具统计跨全部轮次合并 |
+
+第五种同源盲区：**不成功的执行**——三个 P1 全在失败路径（子任务失败、
+进程崩溃、非默认配置），而所有测试都在造成功样本。对策：失败矩阵
+（1 挂 / 全挂 / 中途异常 / 被杀后重开 / 非法配置）各一条用例，
+`TestFailureMatrix` 固化。

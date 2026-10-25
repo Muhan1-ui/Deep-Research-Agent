@@ -32,25 +32,39 @@ from src.agent.tools.search import build_search_tool
 class ResearchRunResult:
     run_id: str
     question: str
+    config: str = "A1"
     plan: list[SubQuery] = field(default_factory=list)
     findings: list[Finding] = field(default_factory=list)
     total_claims: int = 0
     total_failures_degraded: int = 0  # DEGRADED 子任务数（抽取不全）
+    tokens_in: int = 0
+    tokens_out: int = 0
     elapsed_s: float = 0.0
 
     def summary_line(self) -> str:
         ok = sum(f.status is RunStatus.OK for f in self.findings)
         return (
-            f"run={self.run_id} 子问题={len(self.plan)} "
+            f"run={self.run_id} config={self.config} 子问题={len(self.plan)} "
             f"findings OK/DEGRADED/FAILED={ok}/"
             f"{sum(f.status is RunStatus.DEGRADED for f in self.findings)}/"
             f"{sum(f.status is RunStatus.FAILED for f in self.findings)} "
-            f"claims={self.total_claims} 耗时={self.elapsed_s:.1f}s"
+            f"claims={self.total_claims} tokens={self.tokens_in}+{self.tokens_out} "
+            f"耗时={self.elapsed_s:.1f}s"
         )
 
 
 def new_run_id() -> str:
     return f"run-{datetime.now().astimezone().strftime('%Y%m%d%H%M%S')}-{uuid.uuid4().hex[:6]}"
+
+
+def _aggregate_status(findings: list[Finding]) -> RunStatus:
+    """run 终态聚合。FAILED 必须进等式：只数 DEGRADED 会把"挂了一个
+    子任务"记成完全成功，成功率虚高（第五轮审计 P1-a）。"""
+    if not any(f.claims for f in findings):
+        return RunStatus.FAILED
+    if any(f.status is not RunStatus.OK for f in findings):
+        return RunStatus.DEGRADED
+    return RunStatus.OK
 
 
 async def run_research(
@@ -59,7 +73,10 @@ async def run_research(
     llm_factory: Callable[[], object] | None = None,
     db: Database | None = None,
     max_concurrency: int = 4,
+    config: str = "A1",
 ) -> ResearchRunResult:
+    if config not in ("A1", "A2"):  # A2 随 W4 Verifier 生效；A0 走 ask 命令
+        raise SystemExit(f"未知配置 {config}（research 支持 A1，A2 随 W4 加入）")
     settings = settings or Settings()
     if not settings.llm_api_key:
         raise SystemExit("缺少 LLM_API_KEY：复制 .env.example 为 .env 并填写")
@@ -79,14 +96,22 @@ async def run_research(
         args_model=FetchPageArgs,
         handler=fetcher,
     ))
+    # llm 生命周期：工厂每产一个就登记一个，finally 统一 aclose——
+    # 否则批跑几百次 run，每个 worker 一个连接池，fd 会耗尽
+    llms: list = []
+
+    def make_llm():
+        llm = llm_factory()
+        llms.append(llm)
+        return llm
 
     t0 = datetime.now().astimezone()
-    result = ResearchRunResult(run_id=run_id, question=question)
+    result = ResearchRunResult(run_id=run_id, question=question, config=config)
     try:
-        trace.event("run_start", question=question, run_id=run_id)
-        await db.save_run(run_id, question, config="A1")
+        trace.event("run_start", question=question, run_id=run_id, config=config)
+        await db.save_run(run_id, question, config=config)  # 初始 'running'，见 db.py
 
-        plan = await make_plan(llm_factory(), question)
+        plan = await make_plan(make_llm(), question)
         result.plan = plan
         trace.event("plan", sub_queries=[
             {"sub_query_id": s.sub_query_id, "question": s.question} for s in plan
@@ -98,7 +123,7 @@ async def run_research(
             async with sem:
                 try:
                     finding = await research_sub_query(
-                        llm_factory(), registry, run_id, sub,
+                        make_llm(), registry, run_id, sub,
                         resolver=fetcher, extracted_by=settings.llm_model,
                     )
                 except Exception as e:  # noqa: BLE001 —— 单子任务崩溃只标记该 Finding，不拖垮 run
@@ -111,23 +136,34 @@ async def run_research(
                     "sub_done", sub_query_id=sub.sub_query_id,
                     status=finding.status.value, claims=len(finding.claims),
                     searches=len(finding.search_queries),
-                    fetches=finding.pages_fetched, elapsed_s=finding.elapsed_s,
+                    fetches=finding.pages_fetched,
+                    tokens_in=finding.tokens_in, tokens_out=finding.tokens_out,
+                    elapsed_s=finding.elapsed_s,
                 )
                 return finding
 
         result.findings = list(await asyncio.gather(*(worker(s) for s in plan)))
         result.total_claims = sum(len(f.claims) for f in result.findings)
-        result.total_failures_degraded = sum(
-            f.status is RunStatus.DEGRADED for f in result.findings
-        )
-        status = RunStatus.FAILED if not any(
-            f.claims for f in result.findings
-        ) else RunStatus.DEGRADED if result.total_failures_degraded else RunStatus.OK
+        result.tokens_in = sum(f.tokens_in for f in result.findings)
+        result.tokens_out = sum(f.tokens_out for f in result.findings)
+        # 任一子任务非 OK（DEGRADED 或 FAILED）→ run 至少 DEGRADED
+        status = _aggregate_status(result.findings)
         await db.finish_run(run_id, status)
-        trace.event("run_done", status=status.value, claims=result.total_claims)
+        trace.event("run_done", status=status.value, claims=result.total_claims,
+                    tokens_in=result.tokens_in, tokens_out=result.tokens_out)
+    except Exception as e:
+        # 进程内异常：如实记 FAILED；被杀（SIGKILL/OOM）则行停在 'running'——
+        # 两种都不再伪装成功，聚合时 WHERE finished_at IS NOT NULL
+        await db.finish_run(run_id, RunStatus.FAILED, error=f"{type(e).__name__}: {e}")
+        trace.event("run_error", error=f"{type(e).__name__}: {e}"[:200])
+        raise
     finally:
         result.elapsed_s = (datetime.now().astimezone() - t0).total_seconds()
         await fetcher.aclose()
+        for llm in llms:
+            aclose = getattr(llm, "aclose", None)
+            if aclose is not None:
+                await aclose()
         trace.close()
         if own_db:
             db.close()
