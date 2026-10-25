@@ -1,0 +1,16 @@
+# Python
+__pycache__/
+*.pyc
+.venv/
+.pytest_cache/
+dist/
+
+# 秘密与本地配置
+.env
+
+# 运行数据：数据库 / JSONL trace / 抓取的网页原文
+data/
+
+# 评测产出（保留样例与汇总表，原始 run 输出不进 git）
+eval/reports/runs/
+.idea/
