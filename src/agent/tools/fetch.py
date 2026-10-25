@@ -238,6 +238,21 @@ class PageFetcher:
             resp = await client.get(url)
         return resp
 
+    def get_snippet(self, snippet_id: str) -> tuple[FetchedPage, PageSnippet] | None:
+        """PageResolver 协议实现：本会话内存索引。
+
+        重启即失联（数据仍在盘上，索引没了）——可恢复场景由 W3 的
+        SQLite 实现接管，claims 层只依赖协议不依赖本类。
+        """
+        page_id, _, _ = snippet_id.partition(":")
+        page = self.pages.get(page_id)
+        if page is None:
+            return None
+        for s in page.snippets:
+            if s.snippet_id == snippet_id:
+                return page, s
+        return None
+
     async def aclose(self) -> None:
         """进程内复用的连接池由宿主关闭（CLI 进程退出即释放；W3 由 orchestrator 管）。"""
         if self._own is not None:

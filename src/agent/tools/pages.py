@@ -22,6 +22,7 @@ Claim / Verifier / 抽检三头返工。
 
 from __future__ import annotations
 
+import re
 from datetime import date, datetime
 from typing import Literal
 
@@ -80,6 +81,39 @@ class PageSnippet(Contract):
     def verify(self, archive_text: str) -> bool:
         """抽检/测试用：passage 是否真是归档正文的逐字子串。"""
         return archive_text[self.char_start : self.char_end] == self.passage
+
+    def locate_quote(
+        self, quote: str
+    ) -> tuple[int, int] | Literal["ambiguous"] | None:
+        """在片段内定位引文，返回**归档正文坐标系**的绝对跨度。
+
+        三种结局，绝不猜：
+        - (start, end)：唯一定位成功
+        - "ambiguous"：引文在片段中出现多次——锚哪一处都是猜，交调用方
+          失败处理（回喂模型"引用更长上下文"）
+        - None：找不到（含空白容忍路径）
+
+        匹配两级：先逐字 find；失败再空白容忍（模型常把换行/连续空白
+        折叠成单空格，按非空白段以 \\s+ 连接重搜）。
+        """
+        q = quote.strip()
+        if not q:
+            return None
+        if q in self.passage:
+            if self.passage.count(q) > 1:
+                return "ambiguous"
+            idx = self.passage.find(q)
+            return self.char_start + idx, self.char_start + idx + len(q)
+        parts = [re.escape(p) for p in q.split()]
+        if not parts:
+            return None
+        matches = list(re.finditer(r"\s+".join(parts), self.passage))
+        if not matches:
+            return None
+        if len(matches) > 1:
+            return "ambiguous"
+        m = matches[0]
+        return self.char_start + m.start(), self.char_start + m.end()
 
 
 class FetchedPage(Contract):
