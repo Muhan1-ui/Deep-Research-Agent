@@ -1,7 +1,7 @@
-"""CLI 入口：python -m src.agent "你的研究问题" [--max-turns N] [--config A0]
+"""CLI 入口。
 
-W1 只实现 A0（单 Agent：搜索 → 作答）——它同时就是 W6 消融实验的 baseline。
-A1/A2 在 W3+ 由 orchestrator 提供，届时 --config 扩展取值。
+  python -m src.agent ask "问题"        # A0 单 Agent（搜索→作答，消融 baseline）
+  python -m src.agent research "问题"   # 多 Agent 研究管线（W3：规划→并行检索→落库）
 """
 
 from __future__ import annotations
@@ -17,7 +17,7 @@ from src.agent.tools.base import ToolRegistry
 from src.agent.tools.fetch import build_fetch_tool
 from src.agent.tools.search import build_search_tool
 
-SYSTEM_PROMPT = """你是一个严谨的研究助手，当前运行在单 Agent 模式。
+ASK_PROMPT = """你是一个严谨的研究助手，当前运行在单 Agent 模式。
 规则：
 1. 回答事实性/时效性问题前，必须先调用 web_search（可多次、可改写查询词）；
    对搜索结果中信息量大的来源 URL，再调用 fetch_page 深读相关片段；
@@ -34,29 +34,20 @@ def build_registry(settings: Settings) -> ToolRegistry:
     return registry
 
 
-async def run_cli(question: str, max_turns: int, config: str) -> int:
-    if config != "A0":
-        print(f"暂只支持 A0（收到 {config}）；A1/A2 随 W3+ orchestrator 加入", file=sys.stderr)
-        return 2
+async def run_ask(question: str, max_turns: int) -> int:
     settings = Settings()
     if not settings.llm_api_key:
         print("缺少 LLM_API_KEY：复制 .env.example 为 .env 并填写（见 README）", file=sys.stderr)
         return 2
-
-    registry = build_registry(settings)
-    if "web_search" not in registry.names():
-        print("警告: 未配置 TAVILY_API_KEY，本次没有搜索工具，回答仅来自模型自身知识", file=sys.stderr)
-
-    loop = AgentLoop(LLMClient(settings), registry, max_turns=max_turns)
+    loop = AgentLoop(LLMClient(settings), build_registry(settings), max_turns=max_turns)
     try:
-        result = await loop.run(SYSTEM_PROMPT, question)
+        result = await loop.run(ASK_PROMPT, question)
     except FatalLLMError as e:
         print(f"致命错误（修配置后重试）: {e}", file=sys.stderr)
         return 2
     except RetryableLLMError as e:
         print(f"传输错误重试耗尽: {e}", file=sys.stderr)
         return 3
-
     print(result.answer or "(模型未给出回答)")
     print(
         f"[stats] turns={result.turns} tool_calls={result.tool_calls_total} "
@@ -67,15 +58,58 @@ async def run_cli(question: str, max_turns: int, config: str) -> int:
     return 0
 
 
+async def run_research_cli(question: str, concurrency: int) -> int:
+    from src.agent.orchestrator.run import run_research
+    from src.agent.schemas import RunStatus
+
+    settings = Settings()
+    result = await run_research(question, settings=settings, max_concurrency=concurrency)
+    print(f"◆ 研究计划（{len(result.plan)} 个子问题）:")
+    for s in result.plan:
+        print(f"  {s.sub_query_id}: {s.question}")
+    print("◆ 各子问题结果:")
+    for f in result.findings:
+        flag = {"ok": "✓", "degraded": "△", "failed": "✗"}[f.status.value]
+        print(f"  {flag} {f.sub_query_id} claims={len(f.claims)} "
+              f"searches={len(f.search_queries)} fetches={f.pages_fetched} "
+              f"({f.elapsed_s:.1f}s)")
+        if f.error:
+            print(f"      {f.error[:160]}")
+    print(f"◆ {result.summary_line()}")
+    print(f"◆ 明细: sqlite={settings.database_path}  trace=data/traces/{result.run_id}.jsonl")
+    print(f"◆ 示例 claim:")
+    for f in result.findings:
+        for c in f.claims[:1]:
+            print(f"      [{c.claim_id}] {c.text}")
+            print(f"        quote: {c.quote[:80]}")
+            print(f"        来源: {c.url}")
+            print(f"        锚点: {c.quote_locator}")
+            break
+        else:
+            continue
+        break
+    return 0 if any(f.claims for f in result.findings) else 1
+
+
 def main() -> None:
     parser = argparse.ArgumentParser(
-        prog="deep-research-agent", description="多智能体深度研究系统（W1: A0 单 Agent 模式）"
+        prog="deep-research-agent", description="多智能体深度研究系统"
     )
-    parser.add_argument("question", help="研究问题")
-    parser.add_argument("--max-turns", type=int, default=8, help="工具调用轮数上限（默认 8）")
-    parser.add_argument("--config", default="A0", choices=["A0"], help="消融配置开关（W6 用）")
+    sub = parser.add_subparsers(dest="cmd", required=True)
+
+    p_ask = sub.add_parser("ask", help="A0 单 Agent：搜索后作答（消融 baseline）")
+    p_ask.add_argument("question")
+    p_ask.add_argument("--max-turns", type=int, default=8)
+
+    p_res = sub.add_parser("research", help="多 Agent 管线：规划→并行检索→落库（W3）")
+    p_res.add_argument("question")
+    p_res.add_argument("--concurrency", type=int, default=4)
+
     args = parser.parse_args()
-    sys.exit(asyncio.run(run_cli(args.question, args.max_turns, args.config)))
+    if args.cmd == "ask":
+        sys.exit(asyncio.run(run_ask(args.question, args.max_turns)))
+    else:
+        sys.exit(asyncio.run(run_research_cli(args.question, args.concurrency)))
 
 
 if __name__ == "__main__":

@@ -158,11 +158,13 @@ class PageFetcher:
         pages_dir: str | Path = "data/pages",
         client: httpx.AsyncClient | None = None,
         sleep: Callable[[float], Awaitable[None]] = asyncio.sleep,
+        on_page: Callable[[FetchedPage], Awaitable[None]] | None = None,
     ):
         self._dir = Path(pages_dir)
         self._injected = client           # 测试注入 MockTransport
         self._own: httpx.AsyncClient | None = None  # 复用连接池（P2）
         self._sleep = sleep               # 注入以便测试瞬时回放 429 退避
+        self._on_page = on_page           # 抓取完成回调（W3 落库挂这里）
         self.pages: dict[str, FetchedPage] = {}
 
     async def fetch(self, args: FetchPageArgs) -> FetchedPage:
@@ -216,6 +218,8 @@ class PageFetcher:
             elapsed_s=round(time.perf_counter() - t0, 3),
         )
         self.pages[page_id] = page
+        if self._on_page is not None:
+            await self._on_page(page)  # W3：落库钩子，抓取即持久
         return page
 
     async def _get(self, url: str) -> httpx.Response:

@@ -48,7 +48,8 @@ class ResolveFailure(Contract):
     index: int
     snippet_id: str | None
     reason: Literal[
-        "unknown_snippet", "quote_not_located", "ambiguous_quote", "empty_field"
+        "unknown_snippet", "quote_not_located", "ambiguous_quote",
+        "empty_field", "invalid_shape",
     ]
     detail: str = ""
 
