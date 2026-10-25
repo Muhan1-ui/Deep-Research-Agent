@@ -287,7 +287,9 @@ class ReportArtifact(_Contract):
     citation_map: dict[int, str] = Field(
         default_factory=dict,
         description="{报告内引用编号 n: claim_id}。忠实度的分母从这张表反查，"
-        "所以它必须由 writer 显式输出，不能事后从正则里猜。",
+        "所以它必须由 writer 显式输出，不能事后从正则里猜。"
+        "唯一真源约束（W4）：编号由程序分配生成，正文里的 [n] 标记不作数——"
+        "正则解析会误伤代码块和链接，不做。",
     )
     refusals: list[str] = Field(
         default_factory=list,
@@ -361,6 +363,10 @@ class KeyPointHit(_Contract):
 
     检索命中与报告覆盖分开记，是为了让漏斗①和覆盖率用同一份数据源——
     分两处记，就一定会出现"检索命中率 90% 但覆盖率 40%"却查不出在哪断掉。
+
+    已知口径开口（W5 定，见 docs/audit/）：evidence_claim_ids 目前只校验
+    "存在"，不要求"被报告引用"——是否要求 ⊆ cited 取决于 W5 runner
+    在什么时机、由谁产出 hits，现在定就是拍脑袋。
     """
 
     key_point: str
@@ -563,6 +569,13 @@ class EvalRecord(_Contract):
             flags.append(f"coverage<{MIN_COVERAGE}")
         if self.faithfulness is not None and self.faithfulness < MIN_FAITHFULNESS:
             flags.append(f"faithfulness<{MIN_FAITHFULNESS}")
+        if self.report is not None:
+            # 未判定引用的显式报数（ClaimJudgment 文档早就承诺"报告里显式报数"，
+            # 这里是它的实现）：静默丢弃会让 2 条引用判 1 条 → 报 1.0 的假满分
+            judged_ids = {j.claim_id for j in self.judgments if j.judge_label is not None}
+            gap = sum(cid not in judged_ids for cid in self.report.cited_claim_ids)
+            if gap:
+                flags.append(f"judge_gap:{gap}")
         f = self.funnel()
         if f.retrieval_total and f.retrieval_hit_rate < 0.5:
             flags.append("retrieval_low")
@@ -618,10 +631,22 @@ class EvalRecord(_Contract):
         if ghost_j:
             raise ValueError(f"judgment 指向不存在的 claim：{ghost_j[:3]}")
 
+        label_by = {v.claim_id: v.label for v in self.verifications}
         if self.report is not None:
             missing = [cid for cid in self.report.cited_claim_ids if cid not in claim_ids]
             if missing:
                 raise ValueError(f"报告引用了不存在的 claim：{missing[:3]}")
+            # 设计规则（§3.2）早已定死：unsupported 不得进报告。放行会让漏斗
+            # （citable 才计入 claims_cited）与忠实度（计入分母）对同一条引用
+            # 给出矛盾处理——面试答"这条引用算不算"会自相矛盾
+            bad_cite = [
+                cid for cid in self.report.cited_claim_ids
+                if label_by.get(cid) is SupportLabel.UNSUPPORTED
+            ]
+            if bad_cite:
+                raise ValueError(
+                    f"报告引用了 verifier 判为 unsupported 的 claim：{bad_cite[:3]}"
+                )
 
         if self.key_point_hits and len(self.key_point_hits) != len(self.key_points):
             raise ValueError(
@@ -629,6 +654,11 @@ class EvalRecord(_Contract):
                 f"({len(self.key_points)}) 数量不一致：覆盖率分母会失真"
             )
         if self.key_point_hits:
+            # 长度对齐挡不住文本错位：hits 顺序换了覆盖率数字照样对、归因全错
+            if sorted(h.key_point for h in self.key_point_hits) != sorted(self.key_points):
+                raise ValueError(
+                    "key_point_hits 的 key_point 文本与 key_points 不对应：按长度对齐会静默错位"
+                )
             # "证据非空"挡不住证据指向幻觉 claim_id——那是水词命中的变体
             ghost_ev = sorted(
                 {cid for h in self.key_point_hits for cid in h.evidence_claim_ids
@@ -685,8 +715,16 @@ class AgreementStats(_Contract):
             observed_agreement=round(agree / n, 4),
             cohen_kappa=_cohen_kappa([(h.value, j.value) for h, j in pairs]),
             confusion=confusion,
-            n_enriched=sum(j.sample_stratum == "enriched_non_supported" for j in judgments),
-            n_random=sum(j.sample_stratum == "random" for j in judgments),
+            # 分母自洽：层计数只统计"确实参与比对"的样本，
+            # 否则 n=1 而 随机1+富集2=3，三列数字互相打架
+            n_enriched=sum(
+                j.sample_stratum == "enriched_non_supported"
+                for j in judgments if j.agreed is not None
+            ),
+            n_random=sum(
+                j.sample_stratum == "random"
+                for j in judgments if j.agreed is not None
+            ),
         )
 
 

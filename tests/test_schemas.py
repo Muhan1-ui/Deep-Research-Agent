@@ -308,3 +308,53 @@ class TestArchiveRoundtrip:
     def test_each_model_roundtrip(self, obj):
         again = type(obj).model_validate(obj.model_dump())
         assert again == obj
+
+
+# ------------------ 第二轮对抗审计（度量可信性） ------------------
+# 这批洞不破坏结构、只破坏"数字能不能信"——写测试时想的是结构对不对，
+# 想不到"能不能刷分"，所以同源盲区第一轮没抓到。
+
+
+class TestMetricIntegrityAudit:
+    def test_key_point_text_mismatch_rejected(self):
+        # ③ 长度对齐挡不住文本错位：覆盖率数字对、归因全错
+        hits = [
+            KeyPointHit(key_point=k, covered_by_retrieval=False, covered_in_report=False)
+            for k in ["要点一", "要点二", "要点X"]  # 与 key_points 同长但文本不符
+        ]
+        with pytest.raises(ValidationError, match="不对应"):
+            record(status=RunStatus.DEGRADED, key_point_hits=hits)
+
+    def test_citing_unsupported_claim_rejected(self):
+        # ④ 设计规则早已定死 unsupported 不进报告；放行会让漏斗与
+        # 忠实度对同一条引用给出矛盾处理
+        with pytest.raises(ValidationError, match="unsupported"):
+            record(
+                findings=[finding([claim("c1"), claim("c2")])],
+                verifications=[verification("c1", SupportLabel.UNSUPPORTED)],
+                report=ReportArtifact(markdown="x[1]", citation_map={1: "c1"}),
+            )
+
+    def test_unjudged_cited_claims_reported_not_swallowed(self):
+        # 2 条引用只判 1 条：忠实度报 1.0 是假满分，必须显式报缺口
+        rec = record(
+            findings=[finding([claim("c1"), claim("c2")])],
+            report=ReportArtifact(markdown="a[1] b[2]", citation_map={1: "c1", 2: "c2"}),
+            judgments=[ClaimJudgment(claim_id="c1", judge_label=SupportLabel.SUPPORTED)],
+        )
+        assert rec.faithfulness == 1.0  # 数字本身没错
+        assert "judge_gap:1" in rec.quality_flags()  # 但缺口必须可见
+
+    def test_agreement_strata_denominators_reconcile(self):
+        # 层计数只算参与比对的样本：n == n_random + n_enriched
+        js = [
+            ClaimJudgment(claim_id="c1", judge_label=SupportLabel.SUPPORTED,
+                          human_label=SupportLabel.SUPPORTED, sample_stratum="random"),
+            ClaimJudgment(claim_id="c2", judge_label=SupportLabel.PARTIAL,
+                          sample_stratum="enriched_non_supported"),   # 未抽到人工
+            ClaimJudgment(claim_id="c3", judge_label=SupportLabel.PARTIAL,
+                          sample_stratum="enriched_non_supported"),   # 未抽到人工
+        ]
+        stats = AgreementStats.from_judgments(js)
+        assert stats.n == 1
+        assert stats.n_random + stats.n_enriched == stats.n  # 修复前 1 < 1+2
