@@ -53,7 +53,7 @@ def _parse_verdicts(text: str, expected_ids: set[str]) -> dict[str, tuple[Suppor
 
 def _unverified(cid: str, checked_by: str, pv: str) -> Verification:
     return Verification(
-        claim_id=cid, label=SupportLabel.PARTIAL,
+        claim_id=cid, label=SupportLabel.PARTIAL, unverified=True,
         rationale="验证失败，未核验（保守记 partial）", checked_by=checked_by, prompt_version=pv,
     )
 
@@ -80,13 +80,15 @@ async def verify_claims(
             messages.append({"role": "assistant", "content": result.content or ""})
             try:
                 got = _parse_verdicts(result.content or "", expected)
-                if got:
+                # 部分响应必须重试：模型截断/只回前几条时，缺的每条都会
+                # 被无声降级成"未核验"（第六轮审计 P2-C，最坏 11/12 条）
+                if got and len(got) == len(expected):
                     break
             except ValueError:
                 pass
             messages.append({
                 "role": "user",
-                "content": "输出不符合要求（JSON 数组、逐条对应 claim_id）。请重新只输出合规 JSON。",
+                "content": "输出不符合要求（JSON 数组、逐条对应 claim_id、不得遗漏）。请重新只输出合规 JSON。",
             })
         for c in batch:
             hit = got.get(c.claim_id)

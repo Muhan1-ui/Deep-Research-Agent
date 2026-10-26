@@ -1,12 +1,15 @@
 """Writer：已核验论断 → 带引用的研究报告。
 
 citation_map 程序化生成（第二轮审计 ⑧ 的约束落地）：
-- 代码给可引用论断分配临时编号并生成输入表；模型只在正文用 [[n]] 标记、
-  并在结构化输出里声明 cites——它从头到尾接触不到"编号→claim"的绑定；
-- 代码取 cites ∩ 有效编号 ∪ 正文 [[n]] 标记 的并集为"实际引用集"，
-  重排成 1..K 连续编号，正文 token 由代码替换（[[旧]] → [新]，无效 token 剥除）；
-- 不解析普通 [n]（会误伤代码块与链接）——[[n]] 是我们自己定义的协议 token，
-  与自然文本无碰撞；且 cites 声明才是机器可读层，token 只是显示层。
+- 代码给可引用论断分配临时编号并生成输入表；模型只在正文用 [[n]] 标记——
+  它从头到尾接触不到"编号→claim"的绑定；
+- **正文 [[n]] token 是唯一的成员资格来源**（显示层事实，第六轮审计 P2-D）：
+  出现在正文里的有效编号才进 citation_map；cites 声明字段已退出协议，
+  "声明了但正文没写"的编号不再进忠实度分母；
+- 代码把用到的编号重排成 1..K 连续，正文 token 由代码替换（[[旧]] → [新]，
+  无效 token 剥除）；报告末尾追加按 URL 分组的来源清单（第六轮 P1-A）；
+- 不解析普通 [n]（会误伤代码块与链接，如 choices[0]）——[[n]] 是我们自己
+  定义的协议 token，与自然文本无碰撞。
 """
 
 from __future__ import annotations
@@ -27,9 +30,9 @@ WRITER_PROMPT = """你是研究报告撰写人。基于给定的已核验论断�
 规则：
 1. 只使用给定论断，不新增事实；论断未覆盖的方面写"未检索到充分信息"；
 2. 引用格式：在句子末尾用 [[编号]] 标注（如"……[[1]]"），编号只能来自输入表；
-3. verdict=partial 的论断，引用处标注（部分支持）；
-4. 章节用 ## 标题组织，总篇幅 400~800 字；
-5. 只输出 JSON 对象：{"sections": [{"heading": "...", "body": "..."}], "cites": [引用过的编号]}。"""
+3. 输入表标注 partial 的论断，引用处标注（部分支持）；标注"未核验"的论断标注（未核验）；
+4. 章节用 ## 标题组织，总篇幅 400~800 字；不需要写来源清单（程序会生成）；
+5. 只输出 JSON 对象：{"sections": [{"heading": "...", "body": "..."}]}。"""
 
 TOKEN_RE = re.compile(r"\[\[(\d+)\]\]")
 
@@ -52,13 +55,16 @@ def assemble_citable(
 
 def build_writer_input(question: str, numbered: list[tuple[int, Claim]],
                        verifications: list[Verification]) -> str:
-    label_by = {v.claim_id: v.label.value for v in verifications}
-    contra_by = {v.claim_id: v.contradiction_group for v in verifications}
+    by_cid = {v.claim_id: v for v in verifications}
     lines = [f"研究问题：{question}", "", "可引用论断表（编号 | 论断 | 引文 | 核验结果）："]
     for n, c in numbered:
-        tag = label_by.get(c.claim_id, "unverified")
-        if contra_by.get(c.claim_id):
-            tag += f"｜矛盾组{contra_by[c.claim_id]}"
+        v = by_cid.get(c.claim_id)
+        if v is not None and v.unverified:
+            tag = "未核验"  # 与真 partial 严格区分：'不知道'≠'知道一点'
+        else:
+            tag = v.label.value if v is not None else "unverified"
+        if v is not None and v.contradiction_group:
+            tag += f"｜矛盾组{v.contradiction_group}"
         lines.append(f"[[{n}]] | {c.text} | {c.quote[:120]} | {tag}")
     return "\n".join(lines)
 
@@ -69,10 +75,13 @@ def build_report(
     refused: list[Claim],
     writer_output: dict,
 ) -> ReportArtifact:
-    """从 writer 的结构化输出构造 ReportArtifact。编号绑定由代码完成。"""
+    """从 writer 的结构化输出构造 ReportArtifact。编号绑定由代码完成。
+
+    成员资格 = 正文 [[n]] token ∩ 有效编号（显示层事实）。writer_output
+    里的 cites 字段仅为兼容旧格式保留，不参与成员判定。
+    """
     claims_by_no = {n: c for n, c in numbered}
     valid = set(claims_by_no)
-    cites = {int(n) for n in writer_output.get("cites", []) if str(n).isdigit()}
 
     raw_sections = writer_output.get("sections") or []
     used: set[int] = set()
@@ -80,12 +89,9 @@ def build_report(
     for sec in raw_sections:
         heading = str(sec.get("heading", "")).strip() or "（未命名章节）"
         body = str(sec.get("body", ""))
-        body_nos = {int(m) for m in TOKEN_RE.findall(body)}
-        used |= body_nos & valid          # 正文出现的有效 token 也算引用（声明遗漏兜底）
-        used |= cites & valid
+        used |= {int(m) for m in TOKEN_RE.findall(body)} & valid
         cleaned_sections.append((heading, body))
 
-    used &= valid
     renumber = {old: new for new, old in enumerate(sorted(used), 1)}
 
     def _sub(m: re.Match) -> str:
@@ -98,6 +104,22 @@ def build_report(
         new_body = TOKEN_RE.sub(_sub, body)
         sections.append(ReportSection(heading=heading, body=new_body))
         parts.append(f"## {heading}\n\n{new_body}")
+
+    # 来源清单（第六轮 P1-A）：按 URL 分组、编号聚合，读者可点开核对
+    if renumber:
+        inv = {new: old for old, new in renumber.items()}
+        grouped: dict[str, list[int]] = {}
+        titles: dict[str, str] = {}
+        for new in sorted(inv):
+            c = claims_by_no[inv[new]]
+            grouped.setdefault(c.url, []).append(new)
+            titles.setdefault(c.url, c.page_title or c.url)
+        ref_body = "\n".join(
+            f"{''.join(f'[{n}]' for n in nums)} {titles[url]} — {url}"
+            for url, nums in grouped.items()
+        )
+        parts.append(f"## 来源\n\n{ref_body}")
+        sections.append(ReportSection(heading="来源", body=ref_body))
 
     citation_map = {new: claims_by_no[old].claim_id for old, new in renumber.items()}
     refusals = [f"verifier 判 unsupported，拒绝写入：{c.claim_id} {c.text[:60]}" for c in refused]

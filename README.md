@@ -33,6 +33,7 @@ python app/gradio_ui.py
 ```
 
 研究明细：`data/agent.db`（SQLite WAL）与 `data/traces/<run_id>.jsonl`（元数据 trace）；网页归档在 `data/pages/`。
+注意：trace 里 token 在 `sub_done`（逐子任务 `tokens_*`）与 `run_done`（全量 `total_tokens_*`）各记一次，jq 全量求和会双计——按 event 过滤。样例数字来自真实 run（含修复轮重检索成本；DEGRADED 样本）。
 
 > 抓取合规：fetch_page 为低频研究用途直连抓取，未实现 robots.txt 强制拦截；使用时请遵守目标站点的服务条款与访问频率约束。
 

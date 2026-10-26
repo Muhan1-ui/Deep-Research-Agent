@@ -182,8 +182,9 @@ async def run_research(
                     status = RunStatus.DEGRADED  # 有论断但报告零引用：降级如实
 
         await db.finish_run(run_id, status)
+        # 字段名带 total_ 前缀：与 sub_done 的 tokens_* 区分，防 jq 全量求和双计
         trace.event("run_done", status=status.value, claims=result.total_claims,
-                    tokens_in=result.tokens_in, tokens_out=result.tokens_out)
+                    total_tokens_in=result.tokens_in, total_tokens_out=result.tokens_out)
     except Exception as e:
         # 进程内异常：如实记 FAILED；被杀（SIGKILL/OOM）则行停在 'running'——
         # 两种都不再伪装成功，聚合时 WHERE finished_at IS NOT NULL

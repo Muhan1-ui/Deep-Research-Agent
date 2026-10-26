@@ -252,6 +252,12 @@ class Verification(Contract):
         description="一句话理由，**强制短**。长 rationale 的 LLM 判定更容易自圆其说，"
         "而且人工抽检时读不动——它只是给人和 judge 的提示，不是证据。"
     )
+    unverified: bool = Field(
+        default=False,
+        description="True=核验服务失败、从未真正核对（保守记 partial 保持可引用）。"
+        "渲染与统计必须与真 partial 区分：报告标注「未核验」；通过率/忠实度"
+        "把它当数据缺口而非 partial——'不知道'不等于'知道一点'（第六轮审计 P1-B）。",
+    )
     contradiction_group: str | None = Field(
         default=None,
         description="同一 group 内的 claim 互斥（跨源矛盾）。矛盾检测的产物，"
@@ -291,7 +297,8 @@ class ReportArtifact(Contract):
         description="{报告内引用编号 n: claim_id}。忠实度的分母从这张表反查，"
         "所以它必须由 writer 显式输出，不能事后从正则里猜。"
         "唯一真源约束（W4）：编号由程序分配生成，正文里的 [n] 标记不作数——"
-        "正则解析会误伤代码块和链接，不做。",
+        "任何正则扫正文统计引用都会误伤（如代码字段 choices[0] 会被当成 [0]），"
+        "统计引用只从本表读。",
     )
     refusals: list[str] = Field(
         default_factory=list,

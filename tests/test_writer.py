@@ -65,6 +65,16 @@ class TestAssemble:
                                   mk_verdicts([("r:SQ1:001", "partial")]))
         assert "[[1]]" in text and "partial" in text and "问题" in text
 
+    def test_unverified_renders_distinct_from_partial(self):
+        """第六轮 P1-B：'未核验'不得伪装成'部分支持'——输入表里三态可见。"""
+        numbered = [(1, mk_claim("r:SQ1:001")), (2, mk_claim("r:SQ1:002"))]
+        vs = mk_verdicts([("r:SQ1:001", "partial"), ("r:SQ1:002", "partial")])
+        vs[1].unverified = True
+        text = build_writer_input("问题", numbered, vs)
+        line1, line2 = text.strip().splitlines()[-2:]
+        assert "partial" in line1 and "未核验" in line2
+        assert "partial" not in line2  # 未核验行不得再出现 partial 字样
+
 
 class TestBuildReport:
     def numbered(self):
@@ -92,6 +102,29 @@ class TestBuildReport:
         output = {"sections": [{"heading": "h", "body": "只用正文标记[[2]]"}], "cites": []}
         report = build_report("问题", numbered, [], output)
         assert report.citation_map == {1: "r:SQ1:002"}
+
+    def test_cites_without_body_not_in_map(self):
+        """第六轮 P2-D：正文 token 是唯一成员资格——只声明不展示的编号
+        不进 citation_map（忠实度分母不含未展示引用）。"""
+        numbered, _ = self.numbered()
+        output = {"sections": [{"heading": "h", "body": "只写[[1]]"}],
+                  "cites": [1, 2, 3]}  # 声明 3 个，正文只有 1 个
+        report = build_report("问题", numbered, [], output)
+        assert report.citation_map == {1: "r:SQ1:001"}
+        assert report.cited_claim_ids == ["r:SQ1:001"]
+
+    def test_references_section_appended(self):
+        """第六轮 P1-A：报告自带来源清单（按 URL 分组），读者可点开核对。"""
+        numbered, _ = self.numbered()  # 三条 claim 分属三个 URL
+        output = {"sections": [{"heading": "结论", "body": "甲[[1]] 乙[[2]]"}]}
+        report = build_report("问题", numbered, [], output)
+        assert "## 来源" in report.markdown
+        for _, c in numbered[:2]:
+            assert c.url in report.markdown  # URL 可见
+        assert "[1]" in report.markdown and "[2]" in report.markdown
+        # 分组行形如 "[1] ... — url"
+        assert " — https://" in report.markdown
+        assert any(s.heading == "来源" for s in report.sections)
 
     def test_unmatched_token_stripped(self):
         numbered, _ = self.numbered()

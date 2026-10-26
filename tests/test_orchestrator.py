@@ -278,6 +278,7 @@ class TestA2Pipeline:
         assert result.report is not None
         assert len(result.report.citation_map) == 3  # 三条全部 supported → 全被引用
         assert "[1]" in result.report.markdown and "[[1]]" not in result.report.markdown
+        assert "## 来源" in result.report.markdown  # 报告自带来源清单（第六轮 P1-A）
 
         # 报告持久化且可无损读回
         db = Database(settings.database_path)

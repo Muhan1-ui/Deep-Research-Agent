@@ -45,11 +45,15 @@ class TestVerifyClaims:
         assert vs[0].label is SupportLabel.SUPPORTED
         assert "不符合要求" in llm.calls[1][-1]["content"]  # 回喂了错误说明
 
-    def test_missing_verdict_falls_back_to_conservative_partial(self):
-        """漏判的 claim 不允许静默默认 supported——保守记 partial 并标注。"""
-        llm = SmartFakeLLM([final(verdicts_json([("r:S:1", "supported")]))])  # 漏了 :2
+    def test_missing_verdict_retries_then_falls_back_flagged(self):
+        """漏判必须重试（第六轮 P2-C）；重试仍缺 → fallback 且 unverified=True
+        （与真 partial 严格区分）。"""
+        partial = verdicts_json([("r:S:1", "supported")])  # 两条只判一条
+        llm = SmartFakeLLM([final(partial), final(partial)])
         vs = run(verify_claims(llm, [claim("r:S:1"), claim("r:S:2")], checked_by="m"))
-        assert vs[1].label is SupportLabel.PARTIAL
+        assert len(llm.calls) == 2  # 部分响应也触发重试
+        assert vs[0].label is SupportLabel.SUPPORTED and not vs[0].unverified
+        assert vs[1].label is SupportLabel.PARTIAL and vs[1].unverified
         assert "未核验" in vs[1].rationale
 
     def test_unknown_claim_id_ignored(self):
