@@ -17,9 +17,12 @@ from src.agent.schemas import (
     Finding,
     KeyPointHit,
     ReportArtifact,
+    ReportSection,
+    REFERENCE_HEADING,
     RunStatus,
     SupportLabel,
     Verification,
+    count_labels,
 )
 
 
@@ -358,3 +361,72 @@ class TestMetricIntegrityAudit:
         stats = AgreementStats.from_judgments(js)
         assert stats.n == 1
         assert stats.n_random + stats.n_enriched == stats.n  # 修复前 1 < 1+2
+
+
+# ----------------------------- 第七轮：未核验独立成桶 ----------------------------- #
+class TestUnverifiedBucket:
+    """核验失败不是"部分支持"。混进通过率 = 把数据缺口当证据。"""
+
+    def build(self) -> EvalRecord:
+        return record(
+            findings=[finding([claim("c1"), claim("c2"), claim("c3")])],
+            verifications=[
+                verification("c1", SupportLabel.SUPPORTED),
+                verification("c2", SupportLabel.PARTIAL),
+                Verification(claim_id="c3", label=SupportLabel.PARTIAL, rationale="未核验",
+                             checked_by="verifier-model", prompt_version="p1", unverified=True),
+            ],
+            report=ReportArtifact(markdown="a[1] b[2] c[3]",
+                                  citation_map={1: "c1", 2: "c2", 3: "c3"}),
+        )
+
+    def test_unverified_not_counted_as_partial(self):
+        f = self.build().funnel()
+        assert f.claims_supported == 1
+        assert f.claims_partial == 1        # 只剩真 partial
+        assert f.claims_unverified == 1     # 未核验单独成桶
+        assert f.claims_unsupported == 0
+
+    def test_pass_rate_denominator_excludes_unverified(self):
+        f = self.build().funnel()
+        # (supported + partial) / extracted = 2/3，而不是把未核验也算进来的 3/3
+        assert f.verifier_pass_rate == pytest.approx(2 / 3, abs=1e-4)
+
+    def test_buckets_are_mutually_exclusive_and_total(self):
+        f = self.build().funnel()
+        assert (f.claims_supported + f.claims_partial
+                + f.claims_unsupported + f.claims_unverified) == f.claims_extracted
+
+    def test_unverified_still_citable(self):
+        # 保守策略不变：未核验仍可引用（防 Verifier 误杀写空），只是不进通过率
+        f = self.build().funnel()
+        assert f.claims_citable == 3
+
+    def test_count_labels_is_the_single_source_for_funnel_and_trace(self):
+        """第七轮：四桶计数只有一个实现——funnel 与 trace 不可能再分叉。"""
+        vers = self.build().verifications
+        counts = count_labels(vers)
+        assert counts == {"supported": 1, "partial": 1, "unsupported": 0, "unverified": 1}
+        f = self.build().funnel()
+        assert (f.claims_supported, f.claims_partial,
+                f.claims_unverified, f.claims_unsupported) == (
+            counts["supported"], counts["partial"],
+            counts["unverified"], counts["unsupported"])
+
+
+# ----------------------------- 第七轮：篇幅不含来源清单 ----------------------------- #
+class TestWordCountScope:
+    def test_reference_section_not_counted_in_word_count(self):
+        prose = "这是一段正文内容。"
+        with_refs = ReportArtifact(
+            markdown=f"# Q\n\n## 结论\n\n{prose}\n\n## {REFERENCE_HEADING}\n\n[1] 长标题 — https://a.example/very/long/path/that/would/inflate",
+            sections=[
+                ReportSection(heading="结论", body=prose),
+                ReportSection(heading=REFERENCE_HEADING,
+                              body="[1] 长标题 — https://a.example/very/long/path/that/would/inflate"),
+            ],
+        )
+        cjk = sum(1 for ch in prose if "\u4e00" <= ch <= "\u9fff")
+        # 来源清单（含长 URL）一个字都不该计入篇幅
+        assert with_refs.word_count == cjk
+

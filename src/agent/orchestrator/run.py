@@ -22,7 +22,7 @@ from src.agent.agents.writer import write_report
 from src.agent.config import Settings
 from src.agent.llm import LLMClient
 from src.agent.obs.trace import JsonlTrace
-from src.agent.schemas import Finding, RunStatus
+from src.agent.schemas import Finding, RunStatus, count_labels
 from src.agent.storage.db import Database
 from src.agent.tools.base import Tool, ToolRegistry
 from src.agent.tools.fetch import PageFetcher
@@ -165,11 +165,13 @@ async def run_research(
                     verifier_llm, verifications, {c.claim_id: c for c in all_claims})
                 for v in verifications:
                     v.contradiction_group = contra.get(v.claim_id)
+                counts = count_labels(verifications)
                 trace.event(
                     "verify_done", claims=len(all_claims),
-                    supported=sum(v.label.value == "supported" for v in verifications),
-                    partial=sum(v.label.value == "partial" for v in verifications),
-                    unsupported=sum(v.label.value == "unsupported" for v in verifications),
+                    # 与 funnel() 共用 count_labels：未核验单独报、不计入 partial，
+                    # "免费看板"的通过率与评测口径不可能再分叉
+                    supported=counts["supported"], partial=counts["partial"],
+                    unsupported=counts["unsupported"], unverified=counts["unverified"],
                     contradiction_groups=len(set(contra.values())),
                 )
                 report = await write_report(

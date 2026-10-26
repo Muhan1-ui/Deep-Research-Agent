@@ -18,6 +18,7 @@ import re
 
 from src.agent.agents.planner import extract_json_object
 from src.agent.schemas import (
+    REFERENCE_HEADING,
     Claim,
     Finding,
     ReportArtifact,
@@ -35,6 +36,31 @@ WRITER_PROMPT = """你是研究报告撰写人。基于给定的已核验论断�
 5. 只输出 JSON 对象：{"sections": [{"heading": "...", "body": "..."}]}。"""
 
 TOKEN_RE = re.compile(r"\[\[(\d+)\]\]")
+# 自然语言的引用写法（单方括号）。只用来*检测*格式错误，永不参与引用判定——
+# 正文里 "choices[0].delta.content" 这类也会命中，这正是不能拿正则统计引用的原因。
+BARE_CITE_RE = re.compile(r"\[\d+\]")
+
+_RETRY_HINT = "输出不符合要求（需要 JSON 对象且含 sections 数组）。请重新只输出合规 JSON。"
+_BARE_CITE_HINT = (
+    "引用格式不对：正文里用的是单方括号 [1]，协议要求双方括号 [[1]]。"
+    "请保持正文内容不变，把所有引用标记改成 [[n]] 形式，然后重新只输出完整 JSON。"
+)
+
+
+def _looks_like_bare_citations(output: dict) -> bool:
+    """正文出现 [n] 却没有任何 [[n]]：模型把协议 token 写成了自然引用。
+
+    第七轮审计：cites 退出协议后，正文 token 是唯一的成员资格来源，
+    一次符号笔误就会让整份报告零引用（run 直接降级）。这是廉价保险——
+    只在异常时多花一次调用，正常路径零开销。
+    """
+    bodies = [
+        str(s.get("body", ""))
+        for s in (output.get("sections") or [])
+        if isinstance(s, dict)
+    ]
+    joined = "\n".join(bodies)
+    return bool(BARE_CITE_RE.search(joined)) and "[[" not in joined
 
 
 def assemble_citable(
@@ -118,8 +144,8 @@ def build_report(
             f"{''.join(f'[{n}]' for n in nums)} {titles[url]} — {url}"
             for url, nums in grouped.items()
         )
-        parts.append(f"## 来源\n\n{ref_body}")
-        sections.append(ReportSection(heading="来源", body=ref_body))
+        parts.append(f"## {REFERENCE_HEADING}\n\n{ref_body}")
+        sections.append(ReportSection(heading=REFERENCE_HEADING, body=ref_body))
 
     citation_map = {new: claims_by_no[old].claim_id for old, new in renumber.items()}
     refusals = [f"verifier 判 unsupported，拒绝写入：{c.claim_id} {c.text[:60]}" for c in refused]
@@ -147,19 +173,30 @@ async def write_report(
         {"role": "user", "content": user_msg},
     ]
     output: dict | None = None
+    bare_fallback: dict | None = None  # 内容可用但引用格式不合规的候选
     for _ in range(max_retries + 1):
         result = await llm.complete(messages)
         messages.append({"role": "assistant", "content": result.content or ""})
         try:
-            output = extract_json_object(result.content or "")
-            if output.get("sections"):
-                break
+            parsed = extract_json_object(result.content or "")
         except ValueError:
-            pass
-        messages.append({
-            "role": "user",
-            "content": "输出不符合要求（JSON 对象含 sections/cites）。请重新只输出合规 JSON。",
-        })
+            parsed = None
+        if parsed and parsed.get("sections"):
+            if _looks_like_bare_citations(parsed):
+                # 单方括号：内容保留为兜底，但要求模型改格式重发一次
+                bare_fallback = parsed
+                messages.append({"role": "user", "content": _BARE_CITE_HINT})
+                continue
+            output = parsed
+            break
+        messages.append({"role": "user", "content": _RETRY_HINT})
+    if output is None and bare_fallback is not None:
+        # 重试用尽仍不合规：正文仍可读，但不能伪称有可校验引用
+        report = build_report(question, numbered, refused, bare_fallback)
+        report.refusals.append(
+            "引用格式不合规：模型使用单方括号 [n] 而非 [[n]]，本次报告无可校验引用"
+        )
+        return report
     if output is None:
         return ReportArtifact(
             markdown=f"# {question}\n\n（报告生成失败：writer 输出不合规）",

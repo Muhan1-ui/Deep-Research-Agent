@@ -15,8 +15,10 @@ from src.agent.agents.writer import (
     write_report,
 )
 from src.agent.schemas import (
+    REFERENCE_HEADING,
     Claim,
     Finding,
+    ReportArtifact,
     RunStatus,
     SupportLabel,
     Verification,
@@ -157,3 +159,62 @@ class TestWriteReport:
         llm = SmartFakeLLM([final("先说明思路……"), final(good)])
         report = run(write_report(llm, "问题", [finding], verdicts))
         assert report.citation_map == {1: "r:SQ1:001"}
+
+
+class TestWordCountExcludesReferences:
+    def numbered(self):
+        claims = [mk_claim("r:SQ1:001"), mk_claim("r:SQ1:002"), mk_claim("r:SQ2:001")]
+        return [(i, c) for i, c in enumerate(claims, 1)]
+
+    def test_references_section_not_counted(self):
+        """第七轮 P1：篇幅只由正文决定——来源清单随引用数增长，不能算进
+        '报告是否变薄'，否则消融里 A2 更长可能只是引用更多。"""
+        numbered = self.numbered()
+        report = build_report("问题", numbered, [], {
+            "sections": [{"heading": "结论", "body": "甲[[1]]乙[[2]]丙[[3]]"}]})
+        ref = next(s for s in report.sections if s.heading == REFERENCE_HEADING)
+        assert ref.body  # 确实生成了来源行
+        prose_only = ReportArtifact(
+            markdown="", citation_map=report.citation_map,
+            sections=[s for s in report.sections if s.heading != REFERENCE_HEADING])
+        assert report.word_count == prose_only.word_count
+
+
+class TestBareCitationRepair:
+    """第七轮 P2：cites 退出后正文 token 是唯一成员资格，单方括号 = 零引用。"""
+
+    BARE = json.dumps({"sections": [{"heading": "结论", "body": "甲……[1]。"}]},
+                      ensure_ascii=False)
+    TOKEN = json.dumps({"sections": [{"heading": "结论", "body": "甲……[[1]]。"}]},
+                       ensure_ascii=False)
+
+    def test_bare_brackets_trigger_retry_then_accept(self):
+        finding = mk_finding("SQ1", ["r:SQ1:001"])
+        verdicts = mk_verdicts([("r:SQ1:001", "supported")])
+        llm = SmartFakeLLM([final(self.BARE), final(self.TOKEN)])
+        report = run(write_report(llm, "问题", [finding], verdicts))
+        assert len(llm.calls) == 2                    # 确实重试了一次
+        assert report.citation_map == {1: "r:SQ1:001"}
+        # 第二次请求里必须带上格式修正提示
+        assert any("[[n]]" in str(m.get("content", "")) for m in llm.calls[1])
+
+    def test_bare_brackets_persisting_keeps_text_but_no_citations(self):
+        finding = mk_finding("SQ1", ["r:SQ1:001"])
+        verdicts = mk_verdicts([("r:SQ1:001", "supported")])
+        llm = SmartFakeLLM([final(self.BARE), final(self.BARE)])
+        report = run(write_report(llm, "问题", [finding], verdicts))
+        assert report.citation_map == {}              # 绝不伪称有可校验引用
+        assert "甲" in report.markdown                # 正文仍然保留
+        assert any("单方括号" in r for r in report.refusals)
+
+    def test_choices_bracket_is_not_treated_as_citation(self):
+        """正文含 choices[0] 但另有 [[1]] → 不该误判为格式错误。"""
+        body = "流式数据在 choices[0].delta.content，见论断[[1]]。"
+        finding = mk_finding("SQ1", ["r:SQ1:001"])
+        verdicts = mk_verdicts([("r:SQ1:001", "supported")])
+        llm = SmartFakeLLM([final(json.dumps(
+            {"sections": [{"heading": "h", "body": body}]}, ensure_ascii=False))])
+        report = run(write_report(llm, "问题", [finding], verdicts))
+        assert len(llm.calls) == 1                    # 一次通过，无多余重试
+        assert report.citation_map == {1: "r:SQ1:001"}
+        assert "choices[0]" in report.markdown

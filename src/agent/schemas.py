@@ -65,6 +65,10 @@ from pydantic import (
 MIN_COVERAGE = 0.60
 MIN_FAITHFULNESS = 0.85
 
+# 来源清单的章节名：writer 生成它、word_count 排除它——两侧共用这一个常量，
+# 避免"改了一边忘了另一边"（第七轮审计 P1）。
+REFERENCE_HEADING = "来源"
+
 
 # --------------------------------------------------------------------------- #
 # 基类与枚举
@@ -275,6 +279,22 @@ class Verification(Contract):
         return v
 
 
+def count_labels(verifications: list[Verification]) -> dict[str, int]:
+    """三分类 + 未核验的四桶计数 —— funnel() 与 trace/CLI 共用的唯一实现。
+
+    第七轮的教训：字段加了、派生层没跟上，两处口径就会悄悄分叉
+    （funnel 排除了未核验，trace 却还在按 label 数）。把计数收敛到一个函数，
+    「谁读它」就和「谁写它」不可能再错位。
+    """
+    counts = {"supported": 0, "partial": 0, "unsupported": 0, "unverified": 0}
+    for v in verifications:
+        if v.unverified:
+            counts["unverified"] += 1
+        else:
+            counts[v.label.value] += 1
+    return counts
+
+
 # --------------------------------------------------------------------------- #
 # 二、报告产物
 # --------------------------------------------------------------------------- #
@@ -310,12 +330,22 @@ class ReportArtifact(Contract):
     def word_count(self) -> int:
         """报告篇幅：CJK 字符逐个计 + 其余按空白分词。
 
+        排除「来源」章节（第七轮审计 P1）：来源清单的行数随引用数增长，
+        若计入篇幅，消融表里 "A2 写得更长" 可能只是 "A2 引用更多"——
+        恰好污染 word_count 用来防的那件事（"忠实度高是不是因为写得少"）。
+        sections 优先；只有 markdown 的旧记录回退整段计数。
+
         现算而非 Writer 自报——word_count 若是可信输入，"A2 写得少"
         的防线就成了自证。派生值不序列化，与"漏斗是推导视图"同一原则。
         """
-        cjk = sum(1 for ch in self.markdown if "\u4e00" <= ch <= "\u9fff")
+        text = (
+            "\n".join(s.body for s in self.sections if s.heading != REFERENCE_HEADING)
+            if self.sections
+            else self.markdown
+        )
+        cjk = sum(1 for ch in text if "\u4e00" <= ch <= "\u9fff")
         latin_words = len(
-            [w for w in self.markdown.split() if not any("\u4e00" <= ch <= "\u9fff" for ch in w)]
+            [w for w in text.split() if not any("\u4e00" <= ch <= "\u9fff" for ch in w)]
         )
         return cjk + latin_words
 
@@ -402,7 +432,13 @@ class FunnelMetrics(Contract):
     retrieval_total: int = Field(description="① 分母：key_point 总数")
     claims_extracted: int = Field(description="② claims 抽取数（绝对数，是后续一切的天花板）")
     claims_supported: int = Field(default=0, description="③ supported 数")
-    claims_partial: int = Field(default=0, description="③ partial 数（计入通过）")
+    claims_partial: int = Field(default=0, description="③ 真 partial 数（计入通过；未核验另计）")
+    claims_unverified: int = Field(
+        default=0,
+        description="③ 未核验数：核验服务失败/漏判，从未真正核对过。单独成桶、"
+        "不计入通过率——『不知道』不等于『知道一点』（第七轮审计 P1）。"
+        "恒等式：supported + partial + unsupported + unverified == 核验条数",
+    )
     claims_unsupported: int = Field(default=0, description="③ unsupported 数（被过滤）")
     claims_citable: int = Field(default=0, description="④ 分母：可引用 claim 数 = supported + partial")
     claims_cited: int = Field(default=0, description="④ 分子：报告实际引用的 distinct claim 数")
@@ -425,10 +461,11 @@ class FunnelMetrics(Contract):
         return self._ratio(self.claims_cited, self.claims_citable)
 
     def describe(self) -> str:
+        pending = f"｜未核验 {self.claims_unverified}" if self.claims_unverified else ""
         return (
             f"检索 {self.retrieval_hits}/{self.retrieval_total} ({self.retrieval_hit_rate:.0%}) → "
             f"抽取 {self.claims_extracted} → 通过 {self.claims_supported + self.claims_partial} "
-            f"({self.verifier_pass_rate:.0%}) → 引用 {self.claims_cited}/{self.claims_citable} "
+            f"({self.verifier_pass_rate:.0%}){pending} → 引用 {self.claims_cited}/{self.claims_citable} "
             f"({self.writer_citation_rate:.0%})"
         )
 
@@ -537,11 +574,14 @@ class EvalRecord(Contract):
         return round(2 * p * r / (p + r), 4)
 
     def funnel(self) -> FunnelMetrics:
-        """从唯一真源推导四层漏斗。不落库，避免两处数字打架。"""
+        """从唯一真源推导四层漏斗。不落库，避免两处数字打架。
+
+        未核验的 claim 单独成桶、不进 supported/partial（第七轮审计 P1）：
+        它们的 label 出于保守被记成 partial（保持可引用），但"没有核对"
+        不是"部分支持"。混进通过率，等于把数据缺口算成证据。
+        """
         claims = [c for f in self.findings for c in f.claims]
-        by_label: dict[SupportLabel, int] = {lb: 0 for lb in SupportLabel}
-        for v in self.verifications:
-            by_label[v.label] += 1
+        counts = count_labels(self.verifications)
         citable_ids = {
             c.claim_id for c in claims if self._label_of(c.claim_id).citable
         }
@@ -550,9 +590,10 @@ class EvalRecord(Contract):
             retrieval_hits=sum(h.covered_by_retrieval for h in self.key_point_hits),
             retrieval_total=len(self.key_points),
             claims_extracted=len(claims),
-            claims_supported=by_label[SupportLabel.SUPPORTED],
-            claims_partial=by_label[SupportLabel.PARTIAL],
-            claims_unsupported=by_label[SupportLabel.UNSUPPORTED],
+            claims_supported=counts["supported"],
+            claims_partial=counts["partial"],
+            claims_unverified=counts["unverified"],
+            claims_unsupported=counts["unsupported"],
             claims_citable=len(citable_ids),
             claims_cited=len(cited & citable_ids),
         )
@@ -772,6 +813,7 @@ __all__ = [
     "SourceQuality",
     "SupportLabel",
     "Verification",
+    "count_labels",
 ]
 
 
