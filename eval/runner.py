@@ -66,8 +66,10 @@ A0_PROMPT = """你是研究助手（单 Agent 基线模式）。自行决定是�
 # 估算价目（CNY / M tokens，(input, output)）：deepseek-flash 2026-10 牌价估算，
 # 以厂商账单为准核对后调整；未登记的模型成本记 0（token 数始终如实）
 PRICE_CNY_PER_MTOK: dict[str, tuple[float, float]] = {
-    "deepseek-flash": (1.0, 4.0),
-    # "deepseek-v4-pro": (…, …),  # 按账单核对后填——冒烟时 judge 用它，成本暂计 0
+    "deepseek-flash": (1.0, 4.0),  # = DeepSeek-V4.1-Flash-1017；judge 与生产共用
+    # 备用：若把 judge 换成 deepseek-v4-pro（官方牌价 2026-10，cache miss、非高峰
+    # $0.66/M in、$1.98/M out，按与 flash 相同汇率折算 → ¥4.4 / ¥13.2；高峰翻倍）
+    "deepseek-v4-pro": (4.4, 13.2),
 }
 
 
@@ -148,8 +150,8 @@ async def run_a0(
     fetcher, registry = _build_tools(settings, db, http_client)
     traps: list[_UsageTrap] = []
 
-    def make_llm():
-        trap = _UsageTrap(llm_factory())
+    def make_llm(role: str = "A0"):
+        trap = _UsageTrap(llm_factory(), role=role)
         traps.append(trap)
         return trap
 
@@ -161,6 +163,7 @@ async def run_a0(
         lr = await AgentLoop(make_llm(), registry, max_turns=10).run(A0_PROMPT, question)
         result.tokens_in = sum(t.usage_in for t in traps)
         result.tokens_out = sum(t.usage_out for t in traps)
+        result.models_seen = {t.role: t.model for t in traps if t.role and t.model}
 
         obj: dict | None = None
         raws, failures = [], []
@@ -279,9 +282,13 @@ async def build_record(
         run_id=result.run_id, question_id=q.question_id, config=config,
         code_version=code_version, prompt_version=PRODUCER_PROMPT_VERSION,
         dataset_version=dataset_version,
-        model_snapshots={role: _model_for(settings, role)
-                         for role in ("planner", "researcher", "verifier", "writer")},
-        judge_model=settings.judge_model or "unknown",
+        # 复现三元组最后一格：resp.model 真身（别名解析后的事实）优先，
+        # settings 推导兜底（测试假件不带 model 时）
+        model_snapshots={
+            role: result.models_seen.get(role) or _model_for(settings, role)
+            for role in ("planner", "researcher", "verifier", "writer")
+        },
+        judge_model=jtrap.model or settings.judge_model or "unknown",
         producer_vendors=[vendor_of(settings.llm_base_url)],
         # base_url 留空时 judge 实际回落到生产 base_url（见 make_judge_llm）——
         # vendor 必须回落成真名，让同厂商跑批被自检抓到，而不是 "unknown" 静默放行

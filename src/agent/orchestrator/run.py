@@ -34,18 +34,24 @@ class _UsageTrap:
     """包装 LLM：累计 usage——planner/verifier/writer 的 token 也进 run 总账。
 
     之前的总账只数 researcher（findings 求和），规划与写作的成本系统性失踪。
+    同时捕获 resp.model：deepseek-flash 是别名，会随版本重新指向——
+    复现三元组里真正钉死版本的是响应里的实际模型 id（第十一轮审计）。
     __getattr__ 透传其余属性（aclose 等）。
     """
 
-    def __init__(self, inner):
+    def __init__(self, inner, role: str = ""):
         self._inner = inner
+        self.role = role
         self.usage_in = 0
         self.usage_out = 0
+        self.model = ""  # 该角色实际拿到的 resp.model（别名解析后的真身）
 
     async def complete(self, messages, tools=None, **kwargs):
         r = await self._inner.complete(messages, tools, **kwargs)
         self.usage_in += getattr(r, "usage_in", 0) or 0
         self.usage_out += getattr(r, "usage_out", 0) or 0
+        if getattr(r, "model", ""):
+            self.model = r.model
         return r
 
     def __getattr__(self, name):
@@ -75,6 +81,9 @@ class ResearchRunResult:
     plan: list[SubQuery] = field(default_factory=list)
     findings: list[Finding] = field(default_factory=list)
     verifications: list["Verification"] = field(default_factory=list)  # 仅 A2 非空
+    # {角色: 实际 resp.model}——别名（deepseek-flash）解析后的真身
+    # （如 DeepSeek-V4.1-Flash-1017），复现三元组的最后一格
+    models_seen: dict[str, str] = field(default_factory=dict)
     total_claims: int = 0
     total_failures_degraded: int = 0  # DEGRADED 子任务数（抽取不全）
     tokens_in: int = 0
@@ -134,8 +143,8 @@ async def run_research(
     # 否则批跑几百次 run，每个 worker 一个连接池，fd 会耗尽
     traps: list[_UsageTrap] = []
 
-    def make_llm():
-        trap = _UsageTrap(llm_factory())
+    def make_llm(role: str):
+        trap = _UsageTrap(llm_factory(), role=role)
         traps.append(trap)
         return trap
 
@@ -145,7 +154,7 @@ async def run_research(
         trace.event("run_start", question=question, run_id=run_id, config=config)
         await db.save_run(run_id, question, config=config)  # 初始 'running'，见 db.py
 
-        plan = await make_plan(make_llm(), question)
+        plan = await make_plan(make_llm("planner"), question)
         result.plan = plan
         trace.event("plan", sub_queries=[
             {"sub_query_id": s.sub_query_id, "question": s.question} for s in plan
@@ -157,7 +166,7 @@ async def run_research(
             async with sem:
                 try:
                     finding = await research_sub_query(
-                        make_llm(), registry, run_id, sub,
+                        make_llm("researcher"), registry, run_id, sub,
                         resolver=fetcher, extracted_by=settings.llm_model,
                     )
                 except Exception as e:  # noqa: BLE001 —— 单子任务崩溃只标记该 Finding，不拖垮 run
@@ -184,7 +193,7 @@ async def run_research(
         # ---- Verifier（仅 A2）+ Writer（A1/A2 都要报告，否则消融没有可比产物）---- #
         all_claims = [c for f in result.findings for c in f.claims]
         if config == "A2" and all_claims:
-            verifier_llm = make_llm()
+            verifier_llm = make_llm("verifier")
             result.verifications = await verify_claims(
                 verifier_llm, all_claims, checked_by=settings.llm_model)
             contra = await detect_contradictions(
@@ -201,7 +210,7 @@ async def run_research(
                 contradiction_groups=len(set(contra.values())),
             )
         # Writer：A1 无核验 → assemble_citable 视全部论断可引用；A2 只引非 unsupported
-        report = await write_report(make_llm(), question, result.findings, result.verifications)
+        report = await write_report(make_llm("writer"), question, result.findings, result.verifications)
         await db.save_report(run_id, report)
         result.report = report
         trace.event("write_done", cited=len(report.citation_map),
@@ -213,6 +222,8 @@ async def run_research(
         # verifier/writer 的 trap 尚未产生用量就进汇总——治好一半的失踪病）
         result.tokens_in = sum(t.usage_in for t in traps)
         result.tokens_out = sum(t.usage_out for t in traps)
+        # resp.model 真身按角色记录（别名解析后的事实；测试假件可能为空→角色缺席）
+        result.models_seen = {t.role: t.model for t in traps if t.role and t.model}
 
         await db.finish_run(run_id, status)
         # 字段名带 total_ 前缀：与 sub_done 的 tokens_* 区分，防 jq 全量求和双计

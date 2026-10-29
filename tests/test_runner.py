@@ -56,19 +56,21 @@ def make_settings(tmp_path):
 
 
 def judge_fake():
-    """动态 judge：忠实度批量全 supported；覆盖率第 1 要点命中（evidence [1]）。"""
+    """动态 judge：忠实度批量全 supported；覆盖率第 1 要点命中（evidence [1]）。
+    结果带 model 真身——断言 judge_model 钉版本（第十一轮）。"""
     def handle(messages, **kw):
         sys = messages[0]["content"]
         if "忠实度" in sys:
             payload = json.loads(messages[-1]["content"])
-            return final(json.dumps(
+            return LLMResult(content=json.dumps(
                 [{"claim_id": c["claim_id"], "label": "supported", "rationale": "ok"}
-                 for c in payload], ensure_ascii=False))
+                 for c in payload], ensure_ascii=False), model="mock-judge-1017")
         payload = json.loads(messages[-1]["content"])
-        return final(json.dumps([
+        return LLMResult(content=json.dumps([
             {"key_point": kp, "covered_in_report": i == 0,
              "evidence": [1] if i == 0 else [], "covered_by_retrieval": i == 0}
-            for i, kp in enumerate(payload["key_points"])], ensure_ascii=False))
+            for i, kp in enumerate(payload["key_points"])], ensure_ascii=False),
+            model="mock-judge-1017")
     return SmartFakeLLM([handle] * 12)
 
 
@@ -167,6 +169,9 @@ class TestA2Record:
         claims = [c for f in record.findings for c in f.claims]
         assert len(claims) == 3
         assert len(record.verifications) == 3        # verifications 进记录（开放项：partial 拆解）
+        # resp.model 真身进 model_snapshots / judge_model（第十一轮：钉版本）
+        assert set(record.model_snapshots.values()) == {"mock-flash-1017"}
+        assert record.judge_model == "mock-judge-1017"
         assert record.faithfulness == 1.0
         assert record.coverage == pytest.approx(1 / 3, abs=1e-3)
         f = record.funnel()

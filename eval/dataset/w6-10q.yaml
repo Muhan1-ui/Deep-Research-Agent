@@ -1,0 +1,138 @@
+# W6 评测集（10 题草稿）——字段与 src/agent/schemas.py 的 EvalQuestion 对齐。
+# 约束：key_points ≥3（覆盖率要分辨率）；as_of_date 必填（防腐烂、可复现）。
+# 选题原则：答案能在公开网页上核实、要点可判定"实质写到"、不依赖单一厂商博客。
+# 分类配比：fact_check/comparison/timeline/landscape/controversy 各 2 题；难度 2~4。
+
+- question_id: e011
+  question: "Python 3.13 的 free-threaded 构建（PEP 703）解决了什么问题？代价和适用边界是什么？"
+  type: fact_check
+  difficulty: 2
+  as_of_date: 2026-11-01
+  key_points:
+    - "PEP 703 允许在编译期关闭 GIL，产出 free-threaded 构建（3.13 的 python3.13t）"
+    - "目标是让多线程代码真正并行、利用多核；默认构建仍带 GIL"
+    - "代价：单线程性能有可测量下降（3.13 初始版本约 10% 量级）"
+    - "C 扩展需要重新编译/适配新 ABI，未适配的扩展在该构建下可能不可用"
+    - "3.13 中它是可选、实验性的构建，不是默认解释器"
+  notes: "单线程降幅接受'约 10%~20%'的区间表述；'可选/实验性、非默认'是判分核心"
+
+- question_id: e012
+  question: "PostgreSQL 与 ClickHouse 在实时分析场景下如何选型？各自的强项与边界是什么？"
+  type: comparison
+  difficulty: 3
+  as_of_date: 2026-11-01
+  key_points:
+    - "PostgreSQL 行存 + MVCC：事务、点查、频繁更新强，大规模扫描聚合弱"
+    - "ClickHouse 列存 + 向量化执行 + MergeTree：宽表扫描与聚合吞吐高"
+    - "ClickHouse 不适合高频单行更新、强事务与复杂点查，JOIN 能力弱于 PG"
+    - "PG 可用扩展（Citus、TimescaleDB、外部表等）补分析能力，但有规模与运维边界"
+    - "常见架构是 PG 作交易主库、ClickHouse 作分析库，经 CDC/ETL 同步"
+  notes: "等价说法：OLTP vs OLAP、行存 vs 列存；不要求具体版本号"
+
+- question_id: e013
+  question: "HTTP/3 与 QUIC 是怎么标准化的？各自解决什么问题？"
+  type: timeline
+  difficulty: 3
+  as_of_date: 2026-11-01
+  key_points:
+    - "QUIC 最初由 Google 提出（2012 年前后），后交由 IETF 标准化"
+    - "QUIC v1 于 2021 年成为 RFC 9000（配套 RFC 9001/9002）"
+    - "HTTP/3 于 2022 年发布为 RFC 9114"
+    - "HTTP/3 运行在基于 UDP 的 QUIC 之上，内置 TLS 1.3"
+    - "解决 TCP 层队头阻塞，支持 0-RTT 与连接迁移"
+  notes: "年份允许 ±1；核心顺序是'QUIC 先标准化、HTTP/3 后发布'"
+
+- question_id: e014
+  question: "LLM 推理服务框架的生态格局：vLLM、SGLang、TensorRT-LLM 各自定位和取舍是什么？"
+  type: landscape
+  difficulty: 3
+  as_of_date: 2026-11-01
+  key_points:
+    - "vLLM：PagedAttention + continuous batching，通用高吞吐服务的主流选择"
+    - "SGLang：RadixAttention 前缀缓存 + 结构化输出，多轮/Agent 场景见长"
+    - "TensorRT-LLM：绑定 NVIDIA 硬件、需离线编译引擎，单卡性能强但可移植性差"
+    - "共同技术趋势：Paged KV cache、连续批处理、prefix caching、PD 分离"
+    - "选型看硬件绑定、模型支持面、部署复杂度与吞吐/延迟目标"
+  notes: "重点在定位差异而非版本号；允许等价描述"
+
+- question_id: e015
+  question: "生成式 AI 训练数据的版权争议：fair use 与授权两条路径分别靠什么论据支撑？"
+  type: controversy
+  difficulty: 4
+  as_of_date: 2026-11-01
+  key_points:
+    - "美国法下 fair use 四要素：使用目的与性质、作品性质、使用比例、市场影响"
+    - "Authors Guild v. Google（2015）认定扫描建索引属转换性使用"
+    - "Thomson Reuters v. Ross（2025）认为用 Westlaw 判例摘要训练竞品不属 fair use"
+    - "该判决 2025 年 10 月被第三巡回法院维持——首个 AI 训练 fair use 的联邦上诉判例"
+    - "NYT 诉 OpenAI/Microsoft 等案聚焦逐字复现与市场替代"
+    - "授权路径：与新闻机构/图库/社区签订许可；EU 文本与数据挖掘例外允许权利人 opt-out；日本著作権法第 30-4 条"
+    - "争点核心：转换性使用 vs 市场替代；输出复现与记忆化是主要风险点"
+  notes: "判例名称与年份允许近似；'转换性 vs 市场替代'两侧论据必须都出现"
+
+- question_id: e016
+  question: "RAG 里 BM25 与稠密向量检索各有什么取舍？为什么常用混合检索？"
+  type: comparison
+  difficulty: 3
+  as_of_date: 2026-11-01
+  key_points:
+    - "BM25 是词法匹配：精确术语、稀有词、编号强，语义泛化弱"
+    - "稠密向量检索按语义相似度召回，处理同义/改写强，但精确匹配与领域外表现弱"
+    - "混合检索（BM25 + 向量，如 RRF 融合）通常优于单路"
+    - "rerank（cross-encoder）作为第二阶段提升精度，代价是延迟与成本"
+    - "评测需按查询类型分桶，不能只看总体 recall"
+  notes: "等价说法：稀疏 vs 稠密、lexical vs semantic"
+
+- question_id: e017
+  question: "欧盟《人工智能法案》（AI Act）的分阶段生效时间线是怎样的？"
+  type: timeline
+  difficulty: 2
+  as_of_date: 2026-11-01
+  key_points:
+    - "2024 年 8 月 1 日生效（entry into force），按风险分级分阶段适用"
+    - "2025 年 2 月 2 日起禁止性条款与 AI 素养义务适用"
+    - "2025 年 8 月 2 日起通用目的 AI（GPAI）义务适用"
+    - "2026 年 8 月 2 日起透明度义务（Art.50）等条款适用"
+    - "附件 III 高风险主要义务经 Digital Omnibus（Regulation (EU) 2026/1744）推迟至 2027 年 12 月 2 日"
+    - "附件 I 嵌入式高风险推迟至 2028 年 8 月 2 日"
+  notes: "考两件事：'分阶段按风险分级'的主线 + 2026 年修订推迟（只答原 2026-08/2027-08 时间线视为未跟上修订，后两要点记 0）；日期允许 ±1 个月"
+
+- question_id: e018
+  question: "向量数据库怎么选：专用向量库（Qdrant/Milvus/Weaviate）还是 PostgreSQL + pgvector？"
+  type: landscape
+  difficulty: 4
+  as_of_date: 2026-11-01
+  key_points:
+    - "专用向量库在十亿级规模、带过滤的 ANN、水平扩展上更强"
+    - "pgvector 把向量放进 PG：事务一致、SQL 生态、运维统一，适合中小规模"
+    - "pgvector 支持 IVFFlat/HNSW 索引，规模与召回调参有边界"
+    - "混合负载（元数据过滤、事务写入、分析）用 PG 更省心"
+    - "选型看规模、延迟、过滤复杂度与团队运维成本"
+  notes: "规模数字允许量级化表述；不要断言具体 benchmark 分数"
+
+- question_id: e019
+  question: "SSPL/BSL 与 OSI 开源定义的冲突：Redis、Elastic 改许可证的争议后来怎么收场？"
+  type: controversy
+  difficulty: 4
+  as_of_date: 2026-11-01
+  key_points:
+    - "SSPL/BSL 对'作为服务提供'施加额外义务，不符合 OSI 开源定义"
+    - "Redis 2024 年从 BSD 改为 RSALv2/SSPLv1，引发 Valkey 分叉（Linux Foundation）"
+    - "Elastic 2021 年改 SSPL/Elastic License，2024 年又增加 AGPLv3 选项"
+    - "争议核心：云厂商'搭便车'与项目/社区的可持续性"
+    - "后续回摆：Redis 8（2025）重新提供 AGPLv3 选项"
+    - "影响：分叉、采购合规审查、开源治理话语权"
+  notes: "年份允许近似；'OSI 定义冲突'与'云厂商使用'两条主线必须有"
+
+- question_id: e020
+  question: "Git 的 SHA-256 迁移进展到哪一步了？为什么默认还是 SHA-1？"
+  type: fact_check
+  difficulty: 3
+  as_of_date: 2026-11-01
+  key_points:
+    - "SHA-1 已被证明可碰撞（SHAttered，2017），Git 启动 SHA-256 迁移"
+    - "Git 2.29 起支持 SHA-256 仓库（--object-format=sha256），但不是默认"
+    - "SHA-1 与 SHA-256 仓库通过兼容层互操作，能力有限"
+    - "迁移需重写全部对象（rehash），哈希变化导致签名/引用需重建"
+    - "托管平台与工具链支持不完整，是默认切换的主要障碍"
+  notes: "版本号允许近似；'非默认 + 互操作受限 + 全量 rehash'为核心"

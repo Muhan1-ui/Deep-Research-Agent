@@ -228,13 +228,13 @@ def mocked_a2_factory(url: str):
             quote = tool_msg.split("]", 1)[1].strip()[:40]
             return LLMResult(content=json.dumps(
                 [{"text": "MCP 是开放标准", "quote": quote, "snippet_id": sid}],
-                ensure_ascii=False), usage_in=100, usage_out=5)
+                ensure_ascii=False), usage_in=100, usage_out=5, model="mock-flash-1017")
         return SmartFakeLLM([
             LLMResult(content=None, tool_calls=[_tc("t1", "web_search", '{"query": "MCP"}')],
-                      usage_in=100, usage_out=5),
+                      usage_in=100, usage_out=5, model="mock-flash-1017"),
             LLMResult(content=None, tool_calls=[
                 _tc("t2", "fetch_page", json.dumps({"url": url, "query": "MCP"}))],
-                usage_in=100, usage_out=5),
+                usage_in=100, usage_out=5, model="mock-flash-1017"),
             dynamic_claims,
         ])
 
@@ -243,7 +243,7 @@ def mocked_a2_factory(url: str):
             payload = json.loads(messages[-1]["content"])
             return LLMResult(content=json.dumps([
                 {"claim_id": c["claim_id"], "label": "supported", "rationale": "引文支持"}
-                for c in payload], ensure_ascii=False), usage_in=30, usage_out=3)
+                for c in payload], ensure_ascii=False), usage_in=30, usage_out=3, model="mock-flash-1017")
         return SmartFakeLLM([dynamic_verdicts, final("[]")])  # 判定 + 矛盾检测
 
     def writer_llm():
@@ -253,7 +253,7 @@ def mocked_a2_factory(url: str):
             body = "MCP 是开放标准" + "".join(f"……[[{n}]]" for n in nos)
             return LLMResult(content=json.dumps({
                 "sections": [{"heading": "结论", "body": body}],
-            }, ensure_ascii=False), usage_in=40, usage_out=4)
+            }, ensure_ascii=False), usage_in=40, usage_out=4, model="mock-flash-1017")
         return SmartFakeLLM([dynamic_output])
 
     counter = {"n": 0}
@@ -261,7 +261,7 @@ def mocked_a2_factory(url: str):
     def factory():
         counter["n"] += 1
         if counter["n"] == 1:
-            return SmartFakeLLM([LLMResult(content=PLAN_3, usage_in=10, usage_out=2)])
+            return SmartFakeLLM([LLMResult(content=PLAN_3, usage_in=10, usage_out=2, model="mock-flash-1017")])
         if counter["n"] <= 4:
             return researcher_llm()
         if counter["n"] == 5:
@@ -312,6 +312,11 @@ class TestA2Pipeline:
             config="A2", http_client=mocked_client()))
         assert result.tokens_in == 10 + 900 + 30 + 0 + 40
         assert result.tokens_out == 2 + 45 + 3 + 0 + 4
+        # resp.model 真身按角色捕获——复现三元组的最后一格（第十一轮）
+        assert result.models_seen == {
+            "planner": "mock-flash-1017", "researcher": "mock-flash-1017",
+            "verifier": "mock-flash-1017", "writer": "mock-flash-1017",
+        }
         # 总账 ⊃ researcher 分账：planner/verifier/writer 不再失踪
         findings_sum = sum(f.tokens_in for f in result.findings)
         assert findings_sum == 900
