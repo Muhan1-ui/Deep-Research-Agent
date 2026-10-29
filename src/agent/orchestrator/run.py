@@ -22,12 +22,49 @@ from src.agent.agents.writer import write_report
 from src.agent.config import Settings
 from src.agent.llm import LLMClient
 from src.agent.obs.trace import JsonlTrace
-from src.agent.schemas import Finding, RunStatus, count_labels
+from src.agent.schemas import Finding, RunStatus, Verification, count_labels
 from src.agent.storage.db import Database
 from src.agent.tools.base import Tool, ToolRegistry
 from src.agent.tools.fetch import PageFetcher
 from src.agent.tools.pages import FetchPageArgs
 from src.agent.tools.search import build_search_tool
+
+
+class _UsageTrap:
+    """包装 LLM：累计 usage——planner/verifier/writer 的 token 也进 run 总账。
+
+    之前的总账只数 researcher（findings 求和），规划与写作的成本系统性失踪。
+    __getattr__ 透传其余属性（aclose 等）。
+    """
+
+    def __init__(self, inner):
+        self._inner = inner
+        self.usage_in = 0
+        self.usage_out = 0
+
+    async def complete(self, messages, tools=None, **kwargs):
+        r = await self._inner.complete(messages, tools, **kwargs)
+        self.usage_in += getattr(r, "usage_in", 0) or 0
+        self.usage_out += getattr(r, "usage_out", 0) or 0
+        return r
+
+    def __getattr__(self, name):
+        return getattr(self._inner, name)
+
+
+def _build_tools(settings: Settings, db: Database, http_client=None):
+    """共享工具构建：run_research 与 eval.runner 的 A0 基线用同一套接线。"""
+    fetcher = PageFetcher(settings.pages_dir, client=http_client, on_page=db.save_page)
+    registry = ToolRegistry()
+    if settings.tavily_api_key:
+        registry.register(build_search_tool(settings.tavily_api_key))
+    registry.register(Tool(  # 共享同一个 fetcher：claims 解析 + 落库都靠它
+        name="fetch_page",
+        description="读取 URL 正文，返回与 query 最相关的片段（带 id）。",
+        args_model=FetchPageArgs,
+        handler=fetcher,
+    ))
+    return fetcher, registry
 
 
 @dataclass
@@ -37,11 +74,12 @@ class ResearchRunResult:
     config: str = "A1"
     plan: list[SubQuery] = field(default_factory=list)
     findings: list[Finding] = field(default_factory=list)
+    verifications: list["Verification"] = field(default_factory=list)  # 仅 A2 非空
     total_claims: int = 0
     total_failures_degraded: int = 0  # DEGRADED 子任务数（抽取不全）
     tokens_in: int = 0
     tokens_out: int = 0
-    report: object | None = None  # ReportArtifact（A2 才有）
+    report: object | None = None
     elapsed_s: float = 0.0
 
     def summary_line(self) -> str:
@@ -91,24 +129,15 @@ async def run_research(
 
     run_id = new_run_id()
     trace = JsonlTrace(run_id, settings.trace_dir)
-    fetcher = PageFetcher(settings.pages_dir, client=http_client, on_page=db.save_page)
-    registry = ToolRegistry()
-    if settings.tavily_api_key:
-        registry.register(build_search_tool(settings.tavily_api_key))
-    registry.register(Tool(  # 共享同一个 fetcher：claims 解析 + 落库都靠它
-        name="fetch_page",
-        description="读取 URL 正文，返回与 query 最相关的片段（带 id）。",
-        args_model=FetchPageArgs,
-        handler=fetcher,
-    ))
+    fetcher, registry = _build_tools(settings, db, http_client)
     # llm 生命周期：工厂每产一个就登记一个，finally 统一 aclose——
     # 否则批跑几百次 run，每个 worker 一个连接池，fd 会耗尽
-    llms: list = []
+    traps: list[_UsageTrap] = []
 
     def make_llm():
-        llm = llm_factory()
-        llms.append(llm)
-        return llm
+        trap = _UsageTrap(llm_factory())
+        traps.append(trap)
+        return trap
 
     t0 = datetime.now().astimezone()
     result = ResearchRunResult(run_id=run_id, question=question, config=config)
@@ -149,39 +178,40 @@ async def run_research(
 
         result.findings = list(await asyncio.gather(*(worker(s) for s in plan)))
         result.total_claims = sum(len(f.claims) for f in result.findings)
-        result.tokens_in = sum(f.tokens_in for f in result.findings)
-        result.tokens_out = sum(f.tokens_out for f in result.findings)
+        # token 总账来自 _UsageTrap（planner/verifier/writer 也计入），
+        # findings 上的 tokens_* 只是 researcher 侧分账
+        result.tokens_in = sum(t.usage_in for t in traps)
+        result.tokens_out = sum(t.usage_out for t in traps)
         # 任一子任务非 OK（DEGRADED 或 FAILED）→ run 至少 DEGRADED
         status = _aggregate_status(result.findings)
 
-        # ---- A2：Verifier + 矛盾检测 + Writer（citation_map 程序化生成）---- #
-        if config == "A2":
-            all_claims = [c for f in result.findings for c in f.claims]
-            if all_claims:
-                verifier_llm = make_llm()
-                verifications = await verify_claims(
-                    verifier_llm, all_claims, checked_by=settings.llm_model)
-                contra = await detect_contradictions(
-                    verifier_llm, verifications, {c.claim_id: c for c in all_claims})
-                for v in verifications:
-                    v.contradiction_group = contra.get(v.claim_id)
-                counts = count_labels(verifications)
-                trace.event(
-                    "verify_done", claims=len(all_claims),
-                    # 与 funnel() 共用 count_labels：未核验单独报、不计入 partial，
-                    # "免费看板"的通过率与评测口径不可能再分叉
-                    supported=counts["supported"], partial=counts["partial"],
-                    unsupported=counts["unsupported"], unverified=counts["unverified"],
-                    contradiction_groups=len(set(contra.values())),
-                )
-                report = await write_report(
-                    make_llm(), question, result.findings, verifications)
-                await db.save_report(run_id, report)
-                result.report = report
-                trace.event("write_done", cited=len(report.citation_map),
-                            refusals=len(report.refusals))
-                if not report.citation_map and status is RunStatus.OK:
-                    status = RunStatus.DEGRADED  # 有论断但报告零引用：降级如实
+        # ---- Verifier（仅 A2）+ Writer（A1/A2 都要报告，否则消融没有可比产物）---- #
+        all_claims = [c for f in result.findings for c in f.claims]
+        if config == "A2" and all_claims:
+            verifier_llm = make_llm()
+            result.verifications = await verify_claims(
+                verifier_llm, all_claims, checked_by=settings.llm_model)
+            contra = await detect_contradictions(
+                verifier_llm, result.verifications, {c.claim_id: c for c in all_claims})
+            for v in result.verifications:
+                v.contradiction_group = contra.get(v.claim_id)
+            counts = count_labels(result.verifications)
+            trace.event(
+                "verify_done", claims=len(all_claims),
+                # 与 funnel() 共用 count_labels：未核验单独报、不计入 partial，
+                # "免费看板"的通过率与评测口径不可能再分叉
+                supported=counts["supported"], partial=counts["partial"],
+                unsupported=counts["unsupported"], unverified=counts["unverified"],
+                contradiction_groups=len(set(contra.values())),
+            )
+        # Writer：A1 无核验 → assemble_citable 视全部论断可引用；A2 只引非 unsupported
+        report = await write_report(make_llm(), question, result.findings, result.verifications)
+        await db.save_report(run_id, report)
+        result.report = report
+        trace.event("write_done", cited=len(report.citation_map),
+                    refusals=len(report.refusals), verified=len(result.verifications))
+        if not report.citation_map and status is RunStatus.OK:
+            status = RunStatus.DEGRADED  # 有论断但报告零引用：降级如实
 
         await db.finish_run(run_id, status)
         # 字段名带 total_ 前缀：与 sub_done 的 tokens_* 区分，防 jq 全量求和双计
@@ -196,8 +226,8 @@ async def run_research(
     finally:
         result.elapsed_s = (datetime.now().astimezone() - t0).total_seconds()
         await fetcher.aclose()
-        for llm in llms:
-            aclose = getattr(llm, "aclose", None)
+        for trap in traps:
+            aclose = getattr(trap, "aclose", None)
             if aclose is not None:
                 await aclose()
         trace.close()

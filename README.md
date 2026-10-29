@@ -44,5 +44,5 @@ python app/gradio_ui.py
 - [x] W2 fetch_page 片段管线：切段+BM25、双层归档、偏移锚定（四轮对抗审计修复见 docs/audit）
 - [x] W3 Planner + 并行 Researcher + SQLite WAL 落库 + JSONL trace（真实环境：6 子问题并行、54 claims、3 分钟）
 - [x] W4 Verifier + Writer（程序化 citation_map）+ A2 配置 + Gradio demo（真实环境：51 claims → 核验 35 supported → 报告引用 37）
-- [ ] W5 50 题评测集 + runner + 四层漏斗
+- [x] W5 评测 runner：`python -m eval.runner`（judge 跨厂商 temp=0、A0/A1/A2 批跑、漏斗+成对指标、eval_records 落库、汇总表落盘）；50 题数据集人工校对进行中
 - [ ] W6 消融 A0/A1/A2 + 人工抽检

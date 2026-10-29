@@ -69,6 +69,12 @@ CREATE TABLE IF NOT EXISTS reports (
   markdown TEXT NOT NULL,
   artifact TEXT NOT NULL   -- ReportArtifact.model_dump(mode="json")
 );
+CREATE TABLE IF NOT EXISTS eval_records (
+  run_id      TEXT PRIMARY KEY,
+  question_id TEXT NOT NULL,
+  config      TEXT NOT NULL,
+  record      TEXT NOT NULL   -- EvalRecord.model_dump(mode="json")
+);
 """
 
 
@@ -179,6 +185,28 @@ class Database:
             "SELECT artifact FROM reports WHERE run_id=?", (run_id,)
         ).fetchone()
         return ReportArtifact.model_validate(json.loads(row["artifact"])) if row else None
+
+    async def save_eval_record(self, rec) -> None:
+        from src.agent.schemas import EvalRecord
+        assert isinstance(rec, EvalRecord)
+        async with self._write_lock:
+            self._conn.execute(
+                "INSERT OR REPLACE INTO eval_records (run_id, question_id, config, record) "
+                "VALUES (?,?,?,?)",
+                (rec.run_id, rec.question_id, rec.config,
+                 json.dumps(rec.model_dump(mode="json"), ensure_ascii=False)),
+            )
+            self._conn.commit()
+
+    def load_eval_records(self, config: str | None = None) -> list:
+        from src.agent.schemas import EvalRecord
+        sql = "SELECT record FROM eval_records"
+        params: tuple = ()
+        if config:
+            sql += " WHERE config=?"
+            params = (config,)
+        rows = self._conn.execute(sql + " ORDER BY rowid", params).fetchall()
+        return [EvalRecord.model_validate(json.loads(r["record"])) for r in rows]
 
     # ------------------------------ 读（WAL 并发读，不加锁） ------------------------------ #
     def load_findings(self, run_id: str) -> list[Finding]:

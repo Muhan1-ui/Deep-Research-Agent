@@ -403,9 +403,9 @@ class KeyPointHit(Contract):
     检索命中与报告覆盖分开记，是为了让漏斗①和覆盖率用同一份数据源——
     分两处记，就一定会出现"检索命中率 90% 但覆盖率 40%"却查不出在哪断掉。
 
-    已知口径开口（W5 定，见 docs/audit/）：evidence_claim_ids 目前只校验
-    "存在"，不要求"被报告引用"——是否要求 ⊆ cited 取决于 W5 runner
-    在什么时机、由谁产出 hits，现在定就是拍脑袋。
+    已定口径（W5，关闭第二轮审计开放项 ②）：evidence_claim_ids 必须是
+    **被报告引用**的 claim（⊆ citation_map）——覆盖率与忠实度从此共享
+    同一证据集。由 EvalRecord._consistency 强制，judge/runner 在上游过滤。
     """
 
     key_point: str
@@ -709,6 +709,18 @@ class EvalRecord(Contract):
                 raise ValueError(
                     "key_point_hits 的 key_point 文本与 key_points 不对应：按长度对齐会静默错位"
                 )
+            # 开放项 ② 定死的口径：覆盖证据必须 ⊆ citation_map——
+            # 否则覆盖率拿"抽取了但没引用"的 claim 作证据，与忠实度证据集分叉
+            if self.report is not None:
+                cited = set(self.report.cited_claim_ids)
+                uncited_ev = sorted(
+                    {cid for h in self.key_point_hits for cid in h.evidence_claim_ids
+                     if cid not in cited}
+                )
+                if uncited_ev:
+                    raise ValueError(
+                        f"key_point 证据未被报告引用（证据集必须 ⊆ citation_map）：{uncited_ev[:3]}"
+                    )
             # "证据非空"挡不住证据指向幻觉 claim_id——那是水词命中的变体
             ghost_ev = sorted(
                 {cid for h in self.key_point_hits for cid in h.evidence_claim_ids

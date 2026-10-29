@@ -136,3 +136,17 @@ bug 全在"第二次执行"里（第二次 run、重启后的进程、第二次�
 `_aggregate_status` 如实降级为 degraded——失败路径第一次在真实数据上被验证。
 成本实测：566k in / 17k out ≈ ¥0.6（空闲时段）/ ¥1.3（高峰），
 高于 README 的 0.3~0.5 元，需按"含修复轮与失败子任务"重写口径。
+
+## 第八轮（W5 评测 runner，2026-10-29）
+
+| # | 项 | 状态 | 落点 |
+|---|---|---|---|
+| 开放项 ② 关闭 | evidence ⊆ citation_map 成为 schema 硬校验 + judge 上游过滤——覆盖率与忠实度证据集合一 | ✅ | `EvalRecord._consistency` + `judge_key_points`（表外编号过滤，空则如实降级未覆盖） |
+| token 总账失踪 | planner/verifier/writer 的用量从未计入（只有 researcher 分账） | ✅ | `_UsageTrap` 包装全部 LLM 调用，run 总账 = 全链路 |
+| A1 无可比产物 | 消融要求三组都有报告；A1 此前不出报告 | ✅ | Writer 下放 A1/A2 共用（A1 无核验→全部可引用） |
+| 枚举渲染泄漏 | 汇总表出现 `\| AblationConfig.A2 \|`——只有字符串断言能抓，人眼会当"小毛病"放过 | ✅ 自查 | 渲染统一 `.value`；教训：**对"给人看的产物"，断言要按读者的眼睛写** |
+
+W5 交付：judge（temp=0 显式传入、跨厂商独立、批次部分响应重试、漏判=数据缺口）、
+A0 基线（复用同一套测量机械：snippet 句柄→句级锚定→程序化 citation_map）、
+build_record（复现三元组 + 成对指标 + 漏斗）、eval_records 落库、汇总表落盘。
+真实批跑前置条件：.env 配置 JUDGE_API_KEY / JUDGE_MODEL（必须跨厂商）。

@@ -14,9 +14,11 @@ class SmartFakeLLM:
     def __init__(self, script):
         self.script = list(script)
         self.calls: list[list[dict]] = []
+        self.kwargs: list[dict] = []  # complete() 的额外参数（temperature 等）
 
     async def complete(self, messages, tools=None, **kwargs):
         self.calls.append([dict(m) for m in messages])
+        self.kwargs.append(dict(kwargs))
         item = self.script.pop(0)
         if callable(item):
             return item(messages)

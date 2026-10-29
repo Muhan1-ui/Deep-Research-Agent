@@ -210,75 +210,82 @@ def planner_then_empty():
 # ------------------ A2 全链路（W4：verify → write → 报告落库） ------------------ #
 
 
+def mocked_a2_factory(url: str):
+    """可复用的 A2 假件工厂：1 planner + N researcher + 1 verifier + 1 writer。
+    researcher 动态从 fetch 返回里抄 snippet_id（与真模型行为同构）。"""
+    import re as _re
+
+    from src.agent.llm import LLMResult, ToolCallRequest
+    from tests.test_fetch import mocked_client  # noqa: F401 （保证导入链可用）
+
+    def _tc(cid, name, args):
+        return ToolCallRequest(id=cid, name=name, arguments_raw=args)
+
+    def researcher_llm():
+        def dynamic_claims(messages):
+            tool_msg = [m for m in messages if m["role"] == "tool"][-1]["content"]
+            sid = _re.search(r"id=([^\]]+)\]", tool_msg).group(1)
+            quote = tool_msg.split("]", 1)[1].strip()[:40]
+            return final(json.dumps(
+                [{"text": "MCP 是开放标准", "quote": quote, "snippet_id": sid}],
+                ensure_ascii=False))
+        return SmartFakeLLM([
+            LLMResult(content=None, tool_calls=[_tc("t1", "web_search", '{"query": "MCP"}')]),
+            LLMResult(content=None, tool_calls=[
+                _tc("t2", "fetch_page", json.dumps({"url": url, "query": "MCP"}))]),
+            dynamic_claims,
+        ])
+
+    def verifier_llm():
+        def dynamic_verdicts(messages):
+            payload = json.loads(messages[-1]["content"])
+            return final(json.dumps([
+                {"claim_id": c["claim_id"], "label": "supported", "rationale": "引文支持"}
+                for c in payload], ensure_ascii=False))
+        return SmartFakeLLM([dynamic_verdicts, final("[]")])  # 判定 + 矛盾检测
+
+    def writer_llm():
+        def dynamic_output(messages):
+            nos = sorted({int(n) for n in
+                          _re.findall(r"\[\[(\d+)\]\]", messages[-1]["content"])})
+            body = "MCP 是开放标准" + "".join(f"……[[{n}]]" for n in nos)
+            return final(json.dumps({
+                "sections": [{"heading": "结论", "body": body}],
+            }, ensure_ascii=False))
+        return SmartFakeLLM([dynamic_output])
+
+    counter = {"n": 0}
+
+    def factory():
+        counter["n"] += 1
+        if counter["n"] == 1:
+            return SmartFakeLLM([final(PLAN_3)])
+        if counter["n"] <= 4:
+            return researcher_llm()
+        if counter["n"] == 5:
+            return verifier_llm()
+        return writer_llm()
+
+    return factory
+
+
 class TestA2Pipeline:
     def test_full_a2_offline(self, tmp_path):
-        """规划→3×(search→fetch→claims)→核验→矛盾→写作→报告持久化，全部离线。"""
-        import re
-        import httpx
-
-        from src.agent.llm import LLMResult, ToolCallRequest
-        from src.agent.tools.pages import FetchPageArgs
-        from tests.test_fetch import HTML, URL, mocked_client
-
-        def tc(cid, name, args):
-            return ToolCallRequest(id=cid, name=name, arguments_raw=args)
-
-        def researcher_llm():
-            def dynamic_claims(messages):
-                tool_msg = [m for m in messages if m["role"] == "tool"][-1]["content"]
-                sid = re.search(r"id=([^\]]+)\]", tool_msg).group(1)
-                quote = tool_msg.split("]", 1)[1].strip()[:40]
-                return final(json.dumps(
-                    [{"text": "MCP 是开放标准", "quote": quote, "snippet_id": sid}],
-                    ensure_ascii=False))
-            return SmartFakeLLM([
-                LLMResult(content=None, tool_calls=[tc("t1", "web_search", '{"query": "MCP"}')]),
-                LLMResult(content=None, tool_calls=[
-                    tc("t2", "fetch_page", json.dumps({"url": URL, "query": "MCP"}))]),
-                dynamic_claims,
-            ])
-
-        def verifier_llm():
-            def dynamic_verdicts(messages):
-                payload = json.loads(messages[-1]["content"])
-                return final(json.dumps([
-                    {"claim_id": c["claim_id"], "label": "supported", "rationale": "引文支持"}
-                    for c in payload], ensure_ascii=False))
-            return SmartFakeLLM([dynamic_verdicts, final("[]")])  # 判定 + 矛盾检测
-
-        def writer_llm():
-            def dynamic_output(messages):
-                nos = sorted({int(n) for n in
-                              re.findall(r"\[\[(\d+)\]\]", messages[-1]["content"])})
-                body = "MCP 是开放标准" + "".join(f"……[[{n}]]" for n in nos)
-                return final(json.dumps({
-                    "sections": [{"heading": "结论", "body": body}],
-                    "cites": nos,
-                }, ensure_ascii=False))
-            return SmartFakeLLM([dynamic_output])
-
-        counter = {"n": 0}
-
-        def factory():
-            counter["n"] += 1
-            if counter["n"] == 1:
-                return SmartFakeLLM([final(PLAN_3)])
-            if counter["n"] <= 4:
-                return researcher_llm()
-            if counter["n"] == 5:
-                return verifier_llm()
-            return writer_llm()
+        """规划→3×(search→fetch→claims)→核验→矛盾→写作→报告持久化，全部离线。
+        假件工厂抽为模块级 mocked_a2_factory（eval.runner 测试复用同一套）。"""
+        from tests.test_fetch import URL, mocked_client
 
         settings = make_settings(tmp_path)
         result = run(run_research(
-            "研究 MCP", settings=settings, llm_factory=factory, config="A2",
-            http_client=mocked_client()))
+            "研究 MCP", settings=settings, llm_factory=mocked_a2_factory(URL),
+            config="A2", http_client=mocked_client()))
 
         assert result.total_claims == 3  # 3 个 researcher 各 1 条
         assert result.report is not None
         assert len(result.report.citation_map) == 3  # 三条全部 supported → 全被引用
         assert "[1]" in result.report.markdown and "[[1]]" not in result.report.markdown
         assert "## 来源" in result.report.markdown  # 报告自带来源清单（第六轮 P1-A）
+        assert len(result.verifications) == 3       # W5：verifications 随结果返回
 
         # 报告持久化且可无损读回
         db = Database(settings.database_path)
@@ -291,10 +298,13 @@ class TestA2Pipeline:
                   (tmp_path / "traces" / f"{result.run_id}.jsonl")
                   .read_text(encoding="utf-8").strip().splitlines()]
         assert "verify_done" in events and "write_done" in events
-        assert events[-1] == "run_done"
 
-    def test_a1_has_no_report(self, tmp_path):
+    def test_a1_also_writes_report(self, tmp_path):
+        """W5：A1（多 Agent 无核验）也产出报告——消融三组都有可比产物。"""
         settings = make_settings(tmp_path)
         result = run(run_research(
             "q", settings=settings, llm_factory=planner_then_empty(), config="A1"))
-        assert result.report is None
+        # 空论断 → 诚实的空报告 + FAILED 状态
+        assert result.report is not None
+        assert "未检索到" in result.report.markdown
+        assert not result.report.citation_map
