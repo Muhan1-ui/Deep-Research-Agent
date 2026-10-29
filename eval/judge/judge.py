@@ -99,24 +99,56 @@ async def judge_cited_claims(
     return judgments
 
 
+def _clean_evidence(raw) -> list[int] | None:
+    """evidence 白名单收敛（第九轮审计 P0-2）：只认 int/float 列表。
+
+    null（TypeError）、字符串 "1"/"12"（逐字符/巧合解析）、[1.5] 之外
+    的形状一律视为形状失败——宁可重试，不猜。
+    """
+    if not isinstance(raw, list):
+        return None
+    out = []
+    for n in raw:
+        if isinstance(n, bool) or not isinstance(n, (int, float)):
+            return None
+        out.append(int(n))
+    return out
+
+
+def _clean_flag(raw) -> bool | None:
+    """布尔只认 True/False：字符串 "false" 经 bool() 会变 True（假阳性）。"""
+    return raw if isinstance(raw, bool) else None
+
+
 def _parse_cover(text: str, n_points: int) -> list[dict] | None:
-    """按输入顺序对齐；条数不符视为形状失败（重试）。"""
+    """按输入顺序对齐；条数不符或任一字段形状非法 → None（重试）。"""
     items = extract_json_array(text)
     if not isinstance(items, list) or len(items) != n_points:
         return None
-    return items if all(isinstance(x, dict) for x in items) else None
+    for it in items:
+        if not isinstance(it, dict):
+            return None
+        if _clean_flag(it.get("covered_in_report")) is None:
+            return None
+        if _clean_flag(it.get("covered_by_retrieval")) is None:
+            return None
+        if _clean_evidence(it.get("evidence")) is None:
+            return None
+    return items
 
 
 async def judge_key_points(
     llm, question: str, key_points: list[str], report: ReportArtifact,
     claims: list[Claim], judge_model: str, prompt_version: str = "j1",
     max_retries: int = 1,
-) -> list[KeyPointHit]:
+) -> tuple[list[KeyPointHit], list[str]]:
     """要点覆盖 + 检索命中（漏斗①与覆盖率共用这份数据）。
 
     evidence 只收 citation_map 内的编号（开放项 ② 的口径落地）；
     过滤后为空 → covered_in_report=False。
-    重试用尽仍形状失败 → 全部要点如实记未覆盖（保守偏差，宁低勿高）。
+    返回 (hits, notes)：notes 含 "cover_parse_failed" 表示形状重试耗尽、
+    全部要点为保守回退——与 judge_gap 同类的数据缺口显式报数，
+    不与"真的没写"混淆。
     """
     cited_table = [
         {"no": n, "claim_id": cid, "text": next((c.text for c in claims if c.claim_id == cid), "")[:80]}
@@ -142,20 +174,23 @@ async def judge_key_points(
         except ValueError:
             pass
         messages.append({"role": "user",
-                         "content": "输出不符合要求（JSON 数组、条数与要点一致、按顺序）。请重新只输出合规 JSON。"})
-    if items is None:  # 保守回退：全部未覆盖（可见于 coverage 偏低，不伪装）
+                         "content": "输出不符合要求（JSON 数组、条数与要点一致、按顺序、"
+                                    "covered_*/evidence 类型正确）。请重新只输出合规 JSON。"})
+    notes: list[str] = []
+    if items is None:  # 保守回退：全部未覆盖（宁低勿高），但必须留痕
         items = [{"covered_in_report": False, "evidence": [], "covered_by_retrieval": False}
                  for _ in key_points]
+        notes.append("cover_parse_failed")
 
     hits: list[KeyPointHit] = []
     for kp, item in zip(key_points, items):
-        ev_nos = [int(n) for n in item.get("evidence", []) if str(n).isdigit()]
-        ev_ids = [report.citation_map[n] for n in ev_nos if n in report.citation_map]
-        covered = bool(item.get("covered_in_report")) and bool(ev_ids)
+        ev_ids = [report.citation_map[n] for n in _clean_evidence(item.get("evidence")) or []
+                  if n in report.citation_map]
+        covered = _clean_flag(item.get("covered_in_report")) and bool(ev_ids)
         hits.append(KeyPointHit(
             key_point=kp,
-            covered_by_retrieval=bool(item.get("covered_by_retrieval")),
+            covered_by_retrieval=bool(_clean_flag(item.get("covered_by_retrieval"))),
             covered_in_report=covered,
             evidence_claim_ids=ev_ids,
         ))
-    return hits
+    return hits, notes

@@ -534,6 +534,17 @@ class EvalRecord(Contract):
     error: str | None = None
     total_tokens_in: int = 0
     total_tokens_out: int = 0
+    judge_tokens_in: int = Field(
+        default=0,
+        description="judge 侧 token（覆盖判定 payload 含整份报告，不是小数目）——"
+        "与 total_tokens_* 分开记：前者是生产成本、后者是评测成本。",
+    )
+    judge_tokens_out: int = 0
+    judge_notes: list[str] = Field(
+        default_factory=list,
+        description="judge 层异常备注（如 cover_parse_failed：覆盖率解析重试耗尽）——"
+        "数据缺口显式报数，不与'真的没写'混淆（第九轮审计）。",
+    )
     cost_cny: float = 0.0
     wall_seconds: float = 0.0
     search_calls: int = 0
@@ -619,6 +630,7 @@ class EvalRecord(Contract):
             flags.append(f"coverage<{MIN_COVERAGE}")
         if self.faithfulness is not None and self.faithfulness < MIN_FAITHFULNESS:
             flags.append(f"faithfulness<{MIN_FAITHFULNESS}")
+        flags.extend(self.judge_notes)  # judge 层数据缺口（cover_parse_failed 等）原样上报
         if self.report is not None:
             # 未判定引用的显式报数（ClaimJudgment 文档早就承诺"报告里显式报数"，
             # 这里是它的实现）：静默丢弃会让 2 条引用判 1 条 → 报 1.0 的假满分

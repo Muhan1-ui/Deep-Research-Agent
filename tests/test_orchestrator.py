@@ -212,11 +212,11 @@ def planner_then_empty():
 
 def mocked_a2_factory(url: str):
     """可复用的 A2 假件工厂：1 planner + N researcher + 1 verifier + 1 writer。
-    researcher 动态从 fetch 返回里抄 snippet_id（与真模型行为同构）。"""
+    researcher 动态从 fetch 返回里抄 snippet_id（与真模型行为同构）。
+    各角色带 usage 值：token 总账测试依赖（第九轮审计 P0-1）。"""
     import re as _re
 
     from src.agent.llm import LLMResult, ToolCallRequest
-    from tests.test_fetch import mocked_client  # noqa: F401 （保证导入链可用）
 
     def _tc(cid, name, args):
         return ToolCallRequest(id=cid, name=name, arguments_raw=args)
@@ -226,22 +226,24 @@ def mocked_a2_factory(url: str):
             tool_msg = [m for m in messages if m["role"] == "tool"][-1]["content"]
             sid = _re.search(r"id=([^\]]+)\]", tool_msg).group(1)
             quote = tool_msg.split("]", 1)[1].strip()[:40]
-            return final(json.dumps(
+            return LLMResult(content=json.dumps(
                 [{"text": "MCP 是开放标准", "quote": quote, "snippet_id": sid}],
-                ensure_ascii=False))
+                ensure_ascii=False), usage_in=100, usage_out=5)
         return SmartFakeLLM([
-            LLMResult(content=None, tool_calls=[_tc("t1", "web_search", '{"query": "MCP"}')]),
+            LLMResult(content=None, tool_calls=[_tc("t1", "web_search", '{"query": "MCP"}')],
+                      usage_in=100, usage_out=5),
             LLMResult(content=None, tool_calls=[
-                _tc("t2", "fetch_page", json.dumps({"url": url, "query": "MCP"}))]),
+                _tc("t2", "fetch_page", json.dumps({"url": url, "query": "MCP"}))],
+                usage_in=100, usage_out=5),
             dynamic_claims,
         ])
 
     def verifier_llm():
         def dynamic_verdicts(messages):
             payload = json.loads(messages[-1]["content"])
-            return final(json.dumps([
+            return LLMResult(content=json.dumps([
                 {"claim_id": c["claim_id"], "label": "supported", "rationale": "引文支持"}
-                for c in payload], ensure_ascii=False))
+                for c in payload], ensure_ascii=False), usage_in=30, usage_out=3)
         return SmartFakeLLM([dynamic_verdicts, final("[]")])  # 判定 + 矛盾检测
 
     def writer_llm():
@@ -249,9 +251,9 @@ def mocked_a2_factory(url: str):
             nos = sorted({int(n) for n in
                           _re.findall(r"\[\[(\d+)\]\]", messages[-1]["content"])})
             body = "MCP 是开放标准" + "".join(f"……[[{n}]]" for n in nos)
-            return final(json.dumps({
+            return LLMResult(content=json.dumps({
                 "sections": [{"heading": "结论", "body": body}],
-            }, ensure_ascii=False))
+            }, ensure_ascii=False), usage_in=40, usage_out=4)
         return SmartFakeLLM([dynamic_output])
 
     counter = {"n": 0}
@@ -259,7 +261,7 @@ def mocked_a2_factory(url: str):
     def factory():
         counter["n"] += 1
         if counter["n"] == 1:
-            return SmartFakeLLM([final(PLAN_3)])
+            return SmartFakeLLM([LLMResult(content=PLAN_3, usage_in=10, usage_out=2)])
         if counter["n"] <= 4:
             return researcher_llm()
         if counter["n"] == 5:
@@ -298,6 +300,22 @@ class TestA2Pipeline:
                   (tmp_path / "traces" / f"{result.run_id}.jsonl")
                   .read_text(encoding="utf-8").strip().splitlines()]
         assert "verify_done" in events and "write_done" in events
+
+    def test_token_ledger_covers_all_roles(self, tmp_path):
+        """第九轮 P0-1 回归：token 总账必须在 writer 之后求和——
+        planner(10/2) + 3×researcher(各 3 次调用×100/5=900/45) + verifier(30/3) + writer(40/4)。"""
+        from tests.test_fetch import URL, mocked_client
+
+        settings = make_settings(tmp_path)
+        result = run(run_research(
+            "研究 MCP", settings=settings, llm_factory=mocked_a2_factory(URL),
+            config="A2", http_client=mocked_client()))
+        assert result.tokens_in == 10 + 900 + 30 + 0 + 40
+        assert result.tokens_out == 2 + 45 + 3 + 0 + 4
+        # 总账 ⊃ researcher 分账：planner/verifier/writer 不再失踪
+        findings_sum = sum(f.tokens_in for f in result.findings)
+        assert findings_sum == 900
+        assert result.tokens_in > findings_sum
 
     def test_a1_also_writes_report(self, tmp_path):
         """W5：A1（多 Agent 无核验）也产出报告——消融三组都有可比产物。"""

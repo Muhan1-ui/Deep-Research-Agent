@@ -225,3 +225,93 @@ class TestRenderAndBatch:
                           llm_factory=lambda: SmartFakeLLM([]),
                           judge_factory=lambda s: judge_fake(),
                           http_client=mocked_client()))
+
+
+class TestNinthAudit:
+    """第九轮审计修复的回归。"""
+
+    def test_judge_vendor_fallback_flags_independence(self, tmp_path):
+        """P1：JUDGE_BASE_URL 留空 → judge 实际回落生产 base_url，
+        vendor 必须回落成真名让自检抓到，而不是 'unknown' 静默放行。"""
+        from tests.test_fetch import URL, mocked_client
+        from tests.test_orchestrator import mocked_a2_factory
+
+        settings = make_settings(tmp_path).model_copy(update={"judge_base_url": ""})
+        db = Database(settings.database_path)
+        record = run(build_record(
+            load_dataset_qs(tmp_path)[0], "A2", settings,
+            llm_factory=mocked_a2_factory(URL), judge_llm=judge_fake(),
+            db=db, http_client=mocked_client(), code_version="t", dataset_version="d"))
+        db.close()
+        assert record.judge_vendor == "deepseek"   # 与 producer 同厂商（诚实）
+        assert record.check_judge_independence()   # 自检必须报警
+
+    def test_batch_survives_record_crash(self, tmp_path, monkeypatch):
+        """P0-2：一题抛异常 → FAILED 占位记录进分母，批继续、报告照常落盘。"""
+        from tests.test_fetch import URL, mocked_client
+        from tests.test_orchestrator import mocked_a2_factory
+
+        monkeypatch.chdir(tmp_path)
+        settings = make_settings(tmp_path)
+        ds = tmp_path / "ds.yaml"
+        # 两道题：第一道正常（A2 全链路），第二道 planner 输出永远不是 JSON → PlanError
+        ds.write_text(DATASET_1 + DATASET_1.replace("t001", "t002"), encoding="utf-8")
+
+        def factory():
+            a2f = mocked_a2_factory(URL)  # 单独实例：6 次调用内计数自洽
+            def inner():
+                factory.state = getattr(factory, "state", 0) + 1
+                if factory.state <= 6:  # 第 1 题：planner+3res+verifier+writer
+                    return a2f()
+                return SmartFakeLLM([final("我不是 JSON")] * 3)  # 第 2 题：规划崩溃
+            return inner
+
+        md, records = run(run_batch(
+            str(ds), ["A2"], settings=settings, llm_factory=factory(),
+            judge_factory=lambda s: judge_fake(), http_client=mocked_client()))
+        assert len(records) == 2
+        assert records[0].succeeded
+        assert records[1].status is RunStatus.FAILED
+        assert "PlanError" in (records[1].error or "")
+        # 失败样本进分母：成功率 50%，且报告照常产出
+        assert "50%" in md
+        assert list((tmp_path / "eval" / "reports").glob("eval-*.md"))
+
+    def test_report_only_rerenders_from_db(self, tmp_path, monkeypatch):
+        from tests.test_fetch import URL, mocked_client
+        from tests.test_orchestrator import mocked_a2_factory
+        from eval.runner import render_from_db
+
+        monkeypatch.chdir(tmp_path)
+        settings = make_settings(tmp_path)
+        db = Database(settings.database_path)
+        rec = run(build_record(
+            load_dataset_qs(tmp_path)[0], "A2", settings,
+            llm_factory=mocked_a2_factory(URL), judge_llm=judge_fake(),
+            db=db, http_client=mocked_client(), code_version="t", dataset_version="d"))
+        run(db.save_eval_record(rec))
+        db.close()
+        md = render_from_db(settings, "ds.yaml")
+        assert "| A2 |" in md and "有报告n" in md
+
+    def test_unverified_judge_note_reaches_flags(self, tmp_path):
+        """cover_parse_failed 必须出现在 quality_flags——数据缺口显式报数。"""
+        def bad_handle(messages, **kw):
+            return final(json.dumps(
+                [{"key_point": kp, "covered_in_report": True, "evidence": None,
+                  "covered_by_retrieval": True} for kp in
+                 ["要点一", "要点二", "要点三"]]))
+        from tests.test_fetch import URL, mocked_client
+        from tests.test_orchestrator import mocked_a2_factory
+
+        settings = make_settings(tmp_path)
+        db = Database(settings.database_path)
+        # judge 假件要供 4 次调用：忠实度批 2 次（无 label→全部缺口）+ 覆盖 2 次（重试）
+        record = run(build_record(
+            load_dataset_qs(tmp_path)[0], "A2", settings,
+            llm_factory=mocked_a2_factory(URL),
+            judge_llm=SmartFakeLLM([bad_handle] * 4),
+            db=db, http_client=mocked_client(), code_version="t", dataset_version="d"))
+        db.close()
+        assert "cover_parse_failed" in record.judge_notes
+        assert "cover_parse_failed" in record.quality_flags()

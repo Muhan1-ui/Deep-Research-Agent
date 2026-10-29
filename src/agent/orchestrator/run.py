@@ -178,10 +178,6 @@ async def run_research(
 
         result.findings = list(await asyncio.gather(*(worker(s) for s in plan)))
         result.total_claims = sum(len(f.claims) for f in result.findings)
-        # token 总账来自 _UsageTrap（planner/verifier/writer 也计入），
-        # findings 上的 tokens_* 只是 researcher 侧分账
-        result.tokens_in = sum(t.usage_in for t in traps)
-        result.tokens_out = sum(t.usage_out for t in traps)
         # 任一子任务非 OK（DEGRADED 或 FAILED）→ run 至少 DEGRADED
         status = _aggregate_status(result.findings)
 
@@ -212,6 +208,11 @@ async def run_research(
                     refusals=len(report.refusals), verified=len(result.verifications))
         if not report.citation_map and status is RunStatus.OK:
             status = RunStatus.DEGRADED  # 有论断但报告零引用：降级如实
+
+        # token 总账必须在 writer 之后求和（第九轮审计 P0-1：提前求和会让
+        # verifier/writer 的 trap 尚未产生用量就进汇总——治好一半的失踪病）
+        result.tokens_in = sum(t.usage_in for t in traps)
+        result.tokens_out = sum(t.usage_out for t in traps)
 
         await db.finish_run(run_id, status)
         # 字段名带 total_ 前缀：与 sub_done 的 tokens_* 区分，防 jq 全量求和双计

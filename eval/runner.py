@@ -53,7 +53,9 @@ from src.agent.schemas import (
 )
 from src.agent.storage.db import Database
 
-PROMPT_VERSION = "j1"  # judge/覆盖 prompt 版本；改一个字 +1
+# prompt 版本拆分（第九轮审计）：生产链路与 judge 各自演进，改一个字各 +1。
+# judge 版本随 ClaimJudgment.judge_model 标签（"model#j1"）传递，不占这个字段。
+PRODUCER_PROMPT_VERSION = "p1"
 
 A0_PROMPT = """你是研究助手（单 Agent 基线模式）。自行决定是否调用 web_search / fetch_page 完成研究，然后：
 1. 从读到的内容中提取 3~10 条论断，每条附逐字引文与来源片段 id；
@@ -141,7 +143,8 @@ async def run_a0(
         trace.event("run_start", question=question, run_id=run_id, config="A0")
         await db.save_run(run_id, question, "A0")
         lr = await AgentLoop(make_llm(), registry, max_turns=10).run(A0_PROMPT, question)
-        result.tokens_in, result.tokens_out = traps[0].usage_in, traps[0].usage_out
+        result.tokens_in = sum(t.usage_in for t in traps)
+        result.tokens_out = sum(t.usage_out for t in traps)
 
         obj: dict | None = None
         raws, failures = [], []
@@ -220,40 +223,62 @@ async def build_record(
 
     from eval.judge.judge import judge_cited_claims, judge_key_points
 
+    # judge token 单独计量（覆盖判定 payload 含整份报告，不是小数目）
+    jtrap = _UsageTrap(judge_llm)
     all_claims = [c for f in result.findings for c in f.claims]
     judgments: list[ClaimJudgment] = []
     hits: list[KeyPointHit] = []
-    if result.report is not None:
-        if result.report.citation_map and all_claims:
+    judge_notes: list[str] = []
+    if result.report is not None and all_claims:
+        if result.report.citation_map:
             judgments = await judge_cited_claims(
-                judge_llm, all_claims, result.report, settings.judge_model)
-            hits = await judge_key_points(
-                judge_llm, q.question, q.key_points, result.report,
-                all_claims, settings.judge_model)
-        else:  # 有报告无引用：要点如实全记未覆盖（coverage=0，不是 None）
-            hits = [KeyPointHit(key_point=kp, covered_by_retrieval=False,
-                                covered_in_report=False) for kp in q.key_points]
+                jtrap, all_claims, result.report, settings.judge_model)
+        # 覆盖判定独立于引用判定：报告零引用时检索命中仍可如实评估
+        # （漏斗①与写作解耦——"检索 90% 覆盖 40%"的断点信息不能被抹掉）
+        hits, judge_notes = await judge_key_points(
+            jtrap, q.question, q.key_points, result.report,
+            all_claims, settings.judge_model)
+    elif result.report is not None:  # 无任何抽取物：检索命中无从谈起
+        hits = [KeyPointHit(key_point=kp, covered_by_retrieval=False,
+                            covered_in_report=False) for kp in q.key_points]
 
     status = _aggregate_status(result.findings)
     if result.report is not None and not result.report.citation_map and status is RunStatus.OK:
         status = RunStatus.DEGRADED
 
+    # 成本分拆（第九轮审计）：researcher 按生产模型计价，planner/writer 的
+    # strong 模型另一价，judge 再一价；未登记价目的模型计 0（报告里注明）
+    researcher_in = sum(f.tokens_in for f in result.findings)
+    researcher_out = sum(f.tokens_out for f in result.findings)
+    strong = settings.strong_llm_model or settings.llm_model
+    cost_cny = (
+        estimate_cost(settings.llm_model, researcher_in, researcher_out)
+        + estimate_cost(strong,
+                        max(result.tokens_in - researcher_in, 0),
+                        max(result.tokens_out - researcher_out, 0))
+        + estimate_cost(settings.judge_model or "", jtrap.usage_in, jtrap.usage_out)
+    )
+
     return EvalRecord(
         run_id=result.run_id, question_id=q.question_id, config=config,
-        code_version=code_version, prompt_version=PROMPT_VERSION,
+        code_version=code_version, prompt_version=PRODUCER_PROMPT_VERSION,
         dataset_version=dataset_version,
         model_snapshots={role: _model_for(settings, role)
                          for role in ("planner", "researcher", "verifier", "writer")},
         judge_model=settings.judge_model or "unknown",
         producer_vendors=[vendor_of(settings.llm_base_url)],
-        judge_vendor=vendor_of(settings.judge_base_url) if settings.judge_base_url else "unknown",
+        # base_url 留空时 judge 实际回落到生产 base_url（见 make_judge_llm）——
+        # vendor 必须回落成真名，让同厂商跑批被自检抓到，而不是 "unknown" 静默放行
+        judge_vendor=vendor_of(settings.judge_base_url or settings.llm_base_url),
         question=q.question, question_type=q.question_type, difficulty=q.difficulty,
         key_points=q.key_points, as_of_date=q.as_of_date,
         findings=result.findings, verifications=result.verifications,
         report=result.report, judgments=judgments, key_point_hits=hits,
         status=status,
         total_tokens_in=result.tokens_in, total_tokens_out=result.tokens_out,
-        cost_cny=estimate_cost(settings.llm_model, result.tokens_in, result.tokens_out),
+        judge_tokens_in=jtrap.usage_in, judge_tokens_out=jtrap.usage_out,
+        judge_notes=judge_notes,
+        cost_cny=round(cost_cny, 4),
         wall_seconds=result.elapsed_s,
         search_calls=sum(len(f.search_queries) for f in result.findings),
         fetch_calls=sum(f.pages_fetched for f in result.findings),
@@ -266,51 +291,84 @@ def _mean(values: list[float | None]) -> float | None:
     return round(sum(vals) / len(vals), 4) if vals else None
 
 
+def _fmt(v: float | None, pct: bool = False) -> str:
+    """缺值印 n/a 而不是 None——"没算"和"算出 0"必须长得不一样。"""
+    if v is None:
+        return "n/a"
+    return f"{v:.0%}" if pct else f"{v:.4g}"
+
+
 def render_report(
     records: list[EvalRecord], dataset_path: str, dataset_version: str,
     n_questions: int, settings: Settings, code_version: str, warnings: list[str],
 ) -> str:
     ts = datetime.now().astimezone().strftime("%Y-%m-%d %H:%M")
+    priced_models = {settings.llm_model, settings.strong_llm_model or settings.llm_model,
+                     settings.judge_model or ""}
+    unpriced = sorted(m for m in priced_models if m and m not in PRICE_CNY_PER_MTOK)
     lines = [
         f"# 评测报告 {ts}", "",
         f"- 数据集：`{dataset_path}`（v{dataset_version}，n={n_questions}）"
-        f"　配置：{','.join(sorted({r.config for r in records}))}"
-        f"　code：`{code_version}`　prompt：{PROMPT_VERSION}",
+        f"　配置：{','.join(sorted({str(r.config.value) for r in records}))}"
+        f"　code：`{code_version}`　producer prompt：{PRODUCER_PROMPT_VERSION}",
         f"- judge：{settings.judge_model or 'unknown'}"
-        f"（{settings.judge_base_url and vendor_of(settings.judge_base_url) or 'unknown'}）"
+        f"（{vendor_of(settings.judge_base_url or settings.llm_base_url)}）"
         f"　producer：{','.join(sorted({v for r in records for v in r.producer_vendors}))}",
         f"- 同源偏差自检：{'；'.join(warnings) if warnings else 'OK（judge 与生产链路跨厂商）'}",
         "",
-        "| 配置 | n | 成功率 | 忠实度 | 覆盖率 | F1 | 检索命中 | 抽取Σ | 未核验 | 引用率 | tokens(in/out) | 成本¥ | 墙钟s |",
-        "|---|---|---|---|---|---|---|---|---|---|---|---|---|",
+        "| 配置 | n | 有报告n | 成功率 | 忠实度 | 覆盖率 | F1 | 检索命中 | 抽取Σ | 未核验 | 引用率 | tokens(in/out) | 成本¥ | 墙钟s |",
+        "|---|---|---|---|---|---|---|---|---|---|---|---|---|---|",
     ]
     for config in sorted({str(r.config.value) for r in records}):
         rs = [r for r in records if str(r.config.value) == config]
         funnels = [r.funnel() for r in rs]
         lines.append(
             f"| {config} | {len(rs)} "
-            f"| {_mean([1.0 if r.succeeded else 0.0 for r in rs]):.0%} "
-            f"| {_mean([r.faithfulness for r in rs])} "
-            f"| {_mean([r.coverage for r in rs])} "
-            f"| {_mean([r.f1 for r in rs])} "
-            f"| {_mean([f.retrieval_hit_rate for f in funnels]):.0%} "
+            f"| {sum(1 for r in rs if r.report is not None)} "
+            f"| {_fmt(_mean([1.0 if r.succeeded else 0.0 for r in rs]), pct=True)} "
+            f"| {_fmt(_mean([r.faithfulness for r in rs]))} "
+            f"| {_fmt(_mean([r.coverage for r in rs]))} "
+            f"| {_fmt(_mean([r.f1 for r in rs]))} "
+            f"| {_fmt(_mean([f.retrieval_hit_rate for f in funnels]), pct=True)} "
             f"| {sum(f.claims_extracted for f in funnels)} "
             f"| {sum(f.claims_unverified for f in funnels)} "
-            f"| {_mean([f.writer_citation_rate for f in funnels]):.0%} "
+            f"| {_fmt(_mean([f.writer_citation_rate for f in funnels]), pct=True)} "
             f"| {sum(r.total_tokens_in for r in rs)}+{sum(r.total_tokens_out for r in rs)} "
             f"| {sum(r.cost_cny for r in rs):.2f} "
             f"| {sum(r.wall_seconds for r in rs):.0f} |"
         )
-    lines += ["", "通过率/未核验仅对 A2 有意义（A0/A1 无核验阶段）。成本为估算价。", "",
-              "## 逐题明细", ""]
+    lines += [
+        "",
+        "注：通过率/未核验仅对 A2 有意义（A0/A1 无核验阶段）。"
+        "均值只在'有值'样本上计算——用 成功率×n 与 有报告n 交叉读，失败样本不进均值分母。"
+        "成本为估算价（researcher/strong/judge 分档），"
+        + (f"未登记价目：{','.join(unpriced)}（计 0 不代表免费）。" if unpriced else "")
+        + "judge token 在逐题明细单列。",
+        "",
+        "## 逐题明细", "",
+    ]
     for r in records:
         flags = ",".join(r.quality_flags()) or "-"
         lines.append(
             f"- **{r.config.value}/{r.question_id}** {r.status.value}"
             f"{' ✅' if r.succeeded else ' ⚠'}"
-            f" 忠实度={r.faithfulness} 覆盖率={r.coverage} F1={r.f1}"
+            f" 忠实度={_fmt(r.faithfulness)} 覆盖率={_fmt(r.coverage)} F1={_fmt(r.f1)}"
+            f" judge_tokens={r.judge_tokens_in}+{r.judge_tokens_out}"
             f" | {r.funnel().describe()} | flags: {flags}")
     return "\n".join(lines) + "\n"
+
+
+def _failed_record(q: EvalQuestion, config: str, code_version: str,
+                   dataset_version: str, error: str) -> EvalRecord:
+    """单题崩溃时的占位记录：批继续、样本如实进分母（第九轮审计 P0-2）。"""
+    return EvalRecord(
+        run_id=new_run_id(), question_id=q.question_id, config=config,
+        code_version=code_version, prompt_version=PRODUCER_PROMPT_VERSION,
+        dataset_version=dataset_version,
+        question=q.question, question_type=q.question_type,
+        difficulty=q.difficulty, key_points=q.key_points, as_of_date=q.as_of_date,
+        status=RunStatus.FAILED, error=error,
+    )
 
 
 async def run_batch(
@@ -324,7 +382,11 @@ async def run_batch(
     db: Database | None = None,
     http_client=None,
 ) -> tuple[str, list[EvalRecord]]:
-    """批跑 + 持久化 + 汇总。llm/judge 工厂可注入（测试离线）。"""
+    """批跑 + 持久化 + 汇总。llm/judge 工厂可注入（测试离线）。
+
+    单题失败不中断批（LLM 输出一个 null 不该让几小时的跑批白费）——
+    失败题记 FAILED 占位记录进分母；全量落库后可 --report-only 重渲染。
+    """
     settings = settings or Settings()
     if not settings.llm_api_key:
         raise SystemExit("缺少 LLM_API_KEY")
@@ -347,23 +409,50 @@ async def run_batch(
     try:
         for config in configs:
             for q in questions:
-                rec = await build_record(
-                    q, config, settings, llm_factory, judge_llm, db, http_client,
-                    code_version=code_v, dataset_version=dsv,
-                    max_concurrency=max_concurrency)
+                try:
+                    rec = await build_record(
+                        q, config, settings, llm_factory, judge_llm, db, http_client,
+                        code_version=code_v, dataset_version=dsv,
+                        max_concurrency=max_concurrency)
+                except Exception as e:  # noqa: BLE001 —— 单题失败记 FAILED，批继续
+                    rec = _failed_record(q, config, code_v, dsv,
+                                         f"{type(e).__name__}: {e}"[:300])
                 await db.save_eval_record(rec)
                 records.append(rec)
                 warnings.update(rec.check_judge_independence())
     finally:
+        judge_aclose = getattr(judge_llm, "aclose", None)
+        if judge_aclose is not None:
+            await judge_aclose()
         if own_db:
             db.close()
     md = render_report(records, dataset_path, dsv, len(questions),
                        settings, code_v, sorted(warnings))
+    _write_report(md)
+    return md, records
+
+
+def _write_report(md: str) -> Path:
     out_dir = Path("eval/reports")
     out_dir.mkdir(parents=True, exist_ok=True)
     out = out_dir / f"eval-{datetime.now().astimezone().strftime('%Y%m%d%H%M%S')}.md"
     out.write_text(md, encoding="utf-8", newline="")
-    return md, records
+    return out
+
+
+def render_from_db(settings: Settings, dataset_path: str = "(from-db)") -> str:
+    """从 eval_records 表重渲染汇总——跑批中断/补题后不必重跑。"""
+    db = Database(settings.database_path)
+    recs = db.load_eval_records()
+    db.close()
+    if not recs:
+        raise SystemExit("eval_records 为空：先跑批再渲染")
+    warnings = sorted({w for r in recs for w in r.check_judge_independence()})
+    md = render_report(recs, dataset_path, recs[0].dataset_version,
+                       len({r.question_id for r in recs}),
+                       settings, recs[0].code_version, warnings)
+    _write_report(md)
+    return md
 
 
 def main() -> None:
@@ -373,12 +462,19 @@ def main() -> None:
                         choices=["A0", "A1", "A2"])
     parser.add_argument("--limit", type=int, default=None, help="只跑前 N 题（冒烟用）")
     parser.add_argument("--concurrency", type=int, default=4)
+    parser.add_argument("--report-only", action="store_true",
+                        help="不跑批：从 eval_records 表重渲染汇总报告")
     args = parser.parse_args()
-    md, records = asyncio.run(run_batch(
-        args.dataset, args.configs, Settings(),
-        limit=args.limit, max_concurrency=args.concurrency))
+    settings = Settings()
+    if args.report_only:
+        md = render_from_db(settings, args.dataset)
+    else:
+        md, records = asyncio.run(run_batch(
+            args.dataset, args.configs, settings,
+            limit=args.limit, max_concurrency=args.concurrency))
+        print(f"共 {len(records)} 条 EvalRecord 已落库（eval_records 表）")
     print(md)
-    print(f"共 {len(records)} 条 EvalRecord 已落库（eval_records 表），报告见 eval/reports/")
+    print("报告已写入 eval/reports/")
 
 
 if __name__ == "__main__":

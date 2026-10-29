@@ -150,3 +150,21 @@ W5 交付：judge（temp=0 显式传入、跨厂商独立、批次部分响应�
 A0 基线（复用同一套测量机械：snippet 句柄→句级锚定→程序化 citation_map）、
 build_record（复现三元组 + 成对指标 + 漏斗）、eval_records 落库、汇总表落盘。
 真实批跑前置条件：.env 配置 JUDGE_API_KEY / JUDGE_MODEL（必须跨厂商）。
+
+## 第九轮（W5 runner 审计，2026-10-30）
+
+| # | 探针 | 级别 | 状态 | 落点 |
+|---|---|---|---|---|
+| token 总账漏 verifier/writer | 求和发生在 verifier/writer 调用之前——与上一条 commit message 的卖点直接矛盾，且无任何 token 断言所以 182 绿里隐形 | **P0** | ✅ | 求和移到 writer 之后；mocked_a2_factory 带 usage；`test_token_ledger_covers_all_roles` 断言 总账==各角色之和 且 ⊃ researcher 分账 |
+| judge "evidence": null 打断整批 | `item.get("evidence", [])` 对键存在值为 null 返回 None → TypeError；run_batch 无单题容错 → 一题崩全批白跑 | **P0** | ✅ | evidence 白名单（只认 int/float 列表，null/字符串/布尔全拒）+ covered_* 只认真布尔（"false"→bool()==True 的假阳性堵死）+ run_batch 单题 try/except 记 FAILED 占位进分母 + `--report-only` 从库重渲染 |
+| judge_vendor 回落 "unknown" 静默放行 | JUDGE_BASE_URL 留空时 judge 实际回落生产 base_url，同厂商跑批自检却报 OK | **P1** | ✅ | `judge_vendor=vendor_of(judge_base_url or llm_base_url)`——回落真名让自检必须报警（有回归测试） |
+| 覆盖率解析失败与"真的没写"不可区分 | 保守回退记全 False，静默同化 | P1 | ✅ | `EvalRecord.judge_notes` + `cover_parse_failed` 进 quality_flags（与 judge_gap 同类的缺口显式报数） |
+| 成本口径漏 strong/judge 两档 | planner/writer 的 strong 模型另一价；judge token 完全没进账；未登记价目计 0 与"免费"不可分 | P1 | ✅ | cost 分拆三档（researcher=生产价 / rest=strong 价 / judge 独立价）；`judge_tokens_in/out` 独立字段；报告注明未登记价目清单 |
+| prompt_version 被 judge 的 j1 顶替 | W6 改生产 prompt 后复现三元组会撒谎 | P2 | ✅ | 拆 `PRODUCER_PROMPT_VERSION="p1"`；judge 版本随 `judge_model#j1` 标签传递 |
+| 零引用时检索命中被一并归零 | 违反"漏斗①与写作解耦"的自家原则 | P2 | ✅ | 覆盖判定独立于引用判定照跑（citation_map 为空也能评检索命中，有单测） |
+| 均值分母 / None 渲染 | 失败样本不进均值分母无标注；None 印成 "None" | P2 | ✅ | 新增"有报告n"列 + n/a 格式化 + 交叉读脚注 |
+
+第九轮盲区形态（继续"承诺与消费的错位"）：**commit message 先于验证**——
+"收全链路 token"写进了提交说明，实现只覆盖了半条链路，而测试套件里
+没有一条 token 断言可以反驳它。对策：**卖点必须有名有姓的测试**，
+写不进测试的卖点不写进 commit message。

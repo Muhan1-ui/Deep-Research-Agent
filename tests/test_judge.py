@@ -100,12 +100,13 @@ class TestJudgeCitedClaims:
 
 class TestJudgeKeyPoints:
     def test_cover_with_evidence_mapping(self):
-        """evidence 编号 → citation_map 里的 claim_id。"""
+        """evidence 编号 → citation_map 里的 claim_id；notes 为空=正常。"""
         claims = [claim("r:S:1"), claim("r:S:2")]
         rep = report_with({1: "r:S:1"})
         llm = SmartFakeLLM([cover_handle(3, {0: [1]}), cover_handle(3, {0: [1]})])
-        hits = run(judge_key_points(
+        hits, notes = run(judge_key_points(
             llm, "问题", ["要点一", "要点二", "要点三"], rep, claims, "j"))
+        assert notes == []
         assert hits[0].covered_in_report and hits[0].evidence_claim_ids == ["r:S:1"]
         assert not hits[1].covered_in_report and hits[1].evidence_claim_ids == []
 
@@ -114,17 +115,57 @@ class TestJudgeKeyPoints:
         claims = [claim("r:S:1"), claim("r:S:2")]
         rep = report_with({1: "r:S:1"})  # 只有 1 号被引用；2 号存在但未引用
         llm = SmartFakeLLM([cover_handle(2, {0: [2]}), cover_handle(2, {0: [2]})])
-        hits = run(judge_key_points(llm, "问题", ["要点一", "要点二"], rep, claims, "j"))
+        hits, _ = run(judge_key_points(llm, "问题", ["要点一", "要点二"], rep, claims, "j"))
         assert not hits[0].covered_in_report and hits[0].evidence_claim_ids == []
 
-    def test_shape_mismatch_retries_then_conservative(self):
-        """形状失败重试一次；仍失败 → 全部如实记未覆盖（宁低勿高）。"""
+    def test_shape_mismatch_retries_then_conservative_with_flag(self):
+        """形状失败重试一次；仍失败 → 全部未覆盖 + cover_parse_failed 旗标
+        （与'真的没写'可区分——第九轮审计的方法论缺口）。"""
         claims = [claim("r:S:1")]
         rep = report_with({1: "r:S:1"})
         llm = SmartFakeLLM([final("我觉得都覆盖了"), final("还是不对")])
-        hits = run(judge_key_points(llm, "问题", ["要点一", "要点二"], rep, claims, "j"))
+        hits, notes = run(judge_key_points(llm, "问题", ["要点一", "要点二"], rep, claims, "j"))
         assert len(llm.calls) == 2
         assert all(not h.covered_in_report for h in hits)
+        assert notes == ["cover_parse_failed"]
+
+    def test_null_evidence_is_shape_failure(self):
+        """P0-2 探针：'evidence': null 直接打断整批——现在必须是形状失败。"""
+        def handle(messages, **kw):
+            return final(json.dumps([
+                {"key_point": "要点一", "covered_in_report": True,
+                 "evidence": None, "covered_by_retrieval": True}]),)
+        claims = [claim("r:S:1")]
+        rep = report_with({1: "r:S:1"})
+        llm = SmartFakeLLM([handle, handle])
+        hits, notes = run(judge_key_points(llm, "问题", ["要点一"], rep, claims, "j"))
+        assert len(llm.calls) == 2  # 重试了一次
+        assert not hits[0].covered_in_report
+        assert notes == ["cover_parse_failed"]
+
+    def test_string_evidence_and_bool_rejected(self):
+        """evidence "12" 逐字符解析成 12、covered_* "false" 经 bool() 变 True——
+        两类假阳性都必须按形状失败处理。"""
+        def handle(messages, **kw):
+            return final(json.dumps([
+                {"key_point": "要点一", "covered_in_report": "false",
+                 "evidence": ["12"], "covered_by_retrieval": "true"}]))
+        claims = [claim("r:S:1")]
+        rep = report_with({1: "r:S:1"})
+        llm = SmartFakeLLM([handle, handle])
+        hits, notes = run(judge_key_points(llm, "问题", ["要点一"], rep, claims, "j"))
+        assert notes == ["cover_parse_failed"]
+        assert not hits[0].covered_in_report and hits[0].evidence_claim_ids == []
+
+    def test_empty_citation_map_keeps_retrieval_signal(self):
+        """报告零引用时覆盖判定照跑：检索命中如实评估，不被一并归零。"""
+        claims = [claim("r:S:1"), claim("r:S:2")]
+        rep = report_with({})  # 零引用
+        llm = SmartFakeLLM([cover_handle(2, {0: [0]}), cover_handle(2, {0: [0]})])
+        hits, notes = run(judge_key_points(llm, "问题", ["要点一", "要点二"], rep, claims, "j"))
+        assert notes == []
+        assert hits[0].covered_by_retrieval and not hits[0].covered_in_report
+        assert hits[0].evidence_claim_ids == []  # citation_map 为空，无证据可挂
 
     def test_temperature_zero(self):
         llm = SmartFakeLLM([cover_handle(1, {0: [1]}), cover_handle(1, {0: [1]})])
