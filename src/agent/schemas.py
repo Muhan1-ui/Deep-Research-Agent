@@ -622,10 +622,19 @@ class EvalRecord(Contract):
         return self.status is RunStatus.OK and self.report is not None
 
     def quality_flags(self) -> list[str]:
-        """未达标原因标签，供报告做"失败类型分布"（面试时比多一个功能有用）。"""
+        """未达标原因标签，供报告做"失败类型分布"（面试时比多一个功能有用）。
+
+        第十轮真实冒烟修正：degraded（有报告、子任务不全）不得再贴
+        no_report——报告就在记录里，两词并列是自相矛盾，还会把
+        W6 全表的成功率污染成 20~50%。
+        """
         flags: list[str] = []
-        if not self.succeeded:
+        if self.report is None:
             flags.append("no_report")
+        elif self.status is RunStatus.DEGRADED:
+            flags.append("degraded")
+        elif self.status is RunStatus.FAILED:
+            flags.append("run_failed")
         if self.coverage is not None and self.coverage < MIN_COVERAGE:
             flags.append(f"coverage<{MIN_COVERAGE}")
         if self.faithfulness is not None and self.faithfulness < MIN_FAITHFULNESS:

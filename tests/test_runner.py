@@ -315,3 +315,83 @@ class TestNinthAudit:
         db.close()
         assert "cover_parse_failed" in record.judge_notes
         assert "cover_parse_failed" in record.quality_flags()
+
+    def test_degraded_report_not_flagged_no_report(self):
+        """第十轮真实冒烟 P1：有报告的 degraded 题贴 degraded，
+        不再与 no_report 自相矛盾（会污染 W6 全表成功率）。"""
+        from datetime import date
+
+        from src.agent.schemas import EvalRecord, ReportArtifact, RunStatus
+
+        rec = EvalRecord(
+            run_id="r", question_id="q1", config="A2", code_version="t",
+            prompt_version="p1", dataset_version="d",
+            question="问题", question_type="fact_check", difficulty=2,
+            key_points=["a", "b", "c"], as_of_date=date(2026, 11, 1),
+            status=RunStatus.DEGRADED,
+            report=ReportArtifact(markdown="# 报告"),
+        )
+        flags = rec.quality_flags()
+        assert "degraded" in flags and "no_report" not in flags
+
+    def test_render_splits_report_rate_and_green_rate(self, tmp_path):
+        from tests.test_fetch import URL, mocked_client
+        from tests.test_orchestrator import mocked_a2_factory
+
+        settings = make_settings(tmp_path)
+        db = Database(settings.database_path)
+        rec = run(build_record(
+            load_dataset_qs(tmp_path)[0], "A2", settings,
+            llm_factory=mocked_a2_factory(URL), judge_llm=judge_fake(),
+            db=db, http_client=mocked_client(), code_version="t", dataset_version="d"))
+        db.close()
+        md = render_report([rec], "ds.yaml", "abc", 1, settings, "t", [])
+        assert "有报告率" in md and "全绿率" in md  # 两列拆开，成功率不再含糊
+
+    def test_safe_print_survives_gbk_console(self, monkeypatch):
+        """P0：GBK 控制台打 ¥ → UnicodeEncodeError → 退出码 1。
+        兜底逻辑必须 reconfigure(errors='replace') 后重打。"""
+        import io
+
+        from eval.runner import _safe_print
+
+        class GbkStdout:
+            def __init__(self):
+                self.reconfigured = False
+                self.chunks: list[str] = []
+
+            def write(self, s):
+                if not self.reconfigured:
+                    raise UnicodeEncodeError("gbk", "¥", 0, 1, "cannot encode")
+                self.chunks.append(s)
+                return len(s)
+
+            def flush(self):
+                pass
+
+            def reconfigure(self, **kw):
+                assert kw.get("errors") == "replace"
+                self.reconfigured = True
+
+        fake = GbkStdout()
+        monkeypatch.setattr("sys.stdout", fake)
+        _safe_print("成本¥0.27")
+        assert fake.reconfigured
+        assert any("¥" in c for c in fake.chunks)
+
+    def test_jobs_parallel_questions_both_crash(self, tmp_path, monkeypatch):
+        """题间并发（W6 用）：两题同时崩 → 两题都记 FAILED，批照常收尾。"""
+        from tests.test_fetch import mocked_client
+
+        monkeypatch.chdir(tmp_path)
+        settings = make_settings(tmp_path)
+        ds = tmp_path / "ds.yaml"
+        ds.write_text(DATASET_1 + DATASET_1.replace("t001", "t002"), encoding="utf-8")
+        md, records = run(run_batch(
+            str(ds), ["A2"], settings=settings,
+            llm_factory=lambda: SmartFakeLLM([final("不是 JSON")] * 3),
+            judge_factory=lambda s: judge_fake(), http_client=mocked_client(),
+            jobs=2))
+        assert len(records) == 2
+        assert all(r.status is RunStatus.FAILED for r in records)
+        assert list((tmp_path / "eval" / "reports").glob("eval-*.md"))

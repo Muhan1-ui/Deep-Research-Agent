@@ -67,7 +67,23 @@ A0_PROMPT = """你是研究助手（单 Agent 基线模式）。自行决定是�
 # 以厂商账单为准核对后调整；未登记的模型成本记 0（token 数始终如实）
 PRICE_CNY_PER_MTOK: dict[str, tuple[float, float]] = {
     "deepseek-flash": (1.0, 4.0),
+    # "deepseek-v4-pro": (…, …),  # 按账单核对后填——冒烟时 judge 用它，成本暂计 0
 }
+
+
+def _safe_print(text: str) -> None:
+    """GBK 控制台打 ¥ 会 UnicodeEncodeError → 退出码 1（第十轮真实冒烟 P0：
+    DoD"一条命令出报告"的最后一厘米）。降级为 replace 重试，不崩。"""
+    import sys
+
+    try:
+        print(text)
+    except UnicodeEncodeError:
+        try:
+            sys.stdout.reconfigure(errors="replace")
+        except (AttributeError, ValueError):
+            pass
+        print(text)
 
 
 def estimate_cost(model: str, tokens_in: int, tokens_out: int) -> float:
@@ -316,8 +332,8 @@ def render_report(
         f"　producer：{','.join(sorted({v for r in records for v in r.producer_vendors}))}",
         f"- 同源偏差自检：{'；'.join(warnings) if warnings else 'OK（judge 与生产链路跨厂商）'}",
         "",
-        "| 配置 | n | 有报告n | 成功率 | 忠实度 | 覆盖率 | F1 | 检索命中 | 抽取Σ | 未核验 | 引用率 | tokens(in/out) | 成本¥ | 墙钟s |",
-        "|---|---|---|---|---|---|---|---|---|---|---|---|---|---|",
+        "| 配置 | n | 有报告n | 有报告率 | 全绿率 | 忠实度 | 覆盖率 | F1 | 检索命中 | 抽取Σ | 未核验 | 引用率 | tokens(in/out) | 成本¥ | 墙钟s |",
+        "|---|---|---|---|---|---|---|---|---|---|---|---|---|---|---|",
     ]
     for config in sorted({str(r.config.value) for r in records}):
         rs = [r for r in records if str(r.config.value) == config]
@@ -325,6 +341,7 @@ def render_report(
         lines.append(
             f"| {config} | {len(rs)} "
             f"| {sum(1 for r in rs if r.report is not None)} "
+            f"| {_fmt(_mean([1.0 if r.report is not None else 0.0 for r in rs]), pct=True)} "
             f"| {_fmt(_mean([1.0 if r.succeeded else 0.0 for r in rs]), pct=True)} "
             f"| {_fmt(_mean([r.faithfulness for r in rs]))} "
             f"| {_fmt(_mean([r.coverage for r in rs]))} "
@@ -339,8 +356,9 @@ def render_report(
         )
     lines += [
         "",
-        "注：通过率/未核验仅对 A2 有意义（A0/A1 无核验阶段）。"
-        "均值只在'有值'样本上计算——用 成功率×n 与 有报告n 交叉读，失败样本不进均值分母。"
+        "注：有报告率=产出报告的题占比；全绿率=无任何子任务降级/失败的题占比"
+        "（degraded 题有报告、有指标，计入有报告率但不计全绿——W6 全表按此口径读）。"
+        "均值只在'有值'样本上计算。通过率/未核验仅对 A2 有意义。"
         "成本为估算价（researcher/strong/judge 分档），"
         + (f"未登记价目：{','.join(unpriced)}（计 0 不代表免费）。" if unpriced else "")
         + "judge token 在逐题明细单列。",
@@ -381,6 +399,7 @@ async def run_batch(
     judge_factory=None,
     db: Database | None = None,
     http_client=None,
+    jobs: int = 1,
 ) -> tuple[str, list[EvalRecord]]:
     """批跑 + 持久化 + 汇总。llm/judge 工厂可注入（测试离线）。
 
@@ -405,29 +424,33 @@ async def run_batch(
 
     code_v = git_version()
     records: list[EvalRecord] = []
-    warnings: set[str] = set()
+    sem = asyncio.Semaphore(max(1, jobs))  # 题间并发（jobs>1 时 50 题×3 组不再 5.5 小时）
+
+    async def one(q: EvalQuestion, config: str) -> EvalRecord:
+        async with sem:
+            try:
+                rec = await build_record(
+                    q, config, settings, llm_factory, judge_llm, db, http_client,
+                    code_version=code_v, dataset_version=dsv,
+                    max_concurrency=max_concurrency)
+            except Exception as e:  # noqa: BLE001 —— 单题失败记 FAILED，批继续
+                rec = _failed_record(q, config, code_v, dsv,
+                                     f"{type(e).__name__}: {e}"[:300])
+            await db.save_eval_record(rec)  # 完成即落库：中断后 --report-only 可续
+            return rec
+
     try:
-        for config in configs:
-            for q in questions:
-                try:
-                    rec = await build_record(
-                        q, config, settings, llm_factory, judge_llm, db, http_client,
-                        code_version=code_v, dataset_version=dsv,
-                        max_concurrency=max_concurrency)
-                except Exception as e:  # noqa: BLE001 —— 单题失败记 FAILED，批继续
-                    rec = _failed_record(q, config, code_v, dsv,
-                                         f"{type(e).__name__}: {e}"[:300])
-                await db.save_eval_record(rec)
-                records.append(rec)
-                warnings.update(rec.check_judge_independence())
+        records = list(await asyncio.gather(
+            *(one(q, cfg) for cfg in configs for q in questions)))
     finally:
         judge_aclose = getattr(judge_llm, "aclose", None)
         if judge_aclose is not None:
             await judge_aclose()
         if own_db:
             db.close()
+    warnings = sorted({w for r in records for w in r.check_judge_independence()})
     md = render_report(records, dataset_path, dsv, len(questions),
-                       settings, code_v, sorted(warnings))
+                       settings, code_v, warnings)
     _write_report(md)
     return md, records
 
@@ -461,7 +484,8 @@ def main() -> None:
     parser.add_argument("--configs", nargs="+", default=["A2"],
                         choices=["A0", "A1", "A2"])
     parser.add_argument("--limit", type=int, default=None, help="只跑前 N 题（冒烟用）")
-    parser.add_argument("--concurrency", type=int, default=4)
+    parser.add_argument("--concurrency", type=int, default=4, help="题内 researcher 并发")
+    parser.add_argument("--jobs", type=int, default=1, help="题间并发（W6 全矩阵可开 2~3）")
     parser.add_argument("--report-only", action="store_true",
                         help="不跑批：从 eval_records 表重渲染汇总报告")
     args = parser.parse_args()
@@ -471,10 +495,10 @@ def main() -> None:
     else:
         md, records = asyncio.run(run_batch(
             args.dataset, args.configs, settings,
-            limit=args.limit, max_concurrency=args.concurrency))
-        print(f"共 {len(records)} 条 EvalRecord 已落库（eval_records 表）")
-    print(md)
-    print("报告已写入 eval/reports/")
+            limit=args.limit, max_concurrency=args.concurrency, jobs=args.jobs))
+        _safe_print(f"共 {len(records)} 条 EvalRecord 已落库（eval_records 表）")
+    _safe_print(md)
+    _safe_print("报告已写入 eval/reports/")
 
 
 if __name__ == "__main__":

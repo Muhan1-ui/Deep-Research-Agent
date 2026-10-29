@@ -168,3 +168,21 @@ build_record（复现三元组 + 成对指标 + 漏斗）、eval_records 落库�
 "收全链路 token"写进了提交说明，实现只覆盖了半条链路，而测试套件里
 没有一条 token 断言可以反驳它。对策：**卖点必须有名有姓的测试**，
 写不进测试的卖点不写进 commit message。
+
+## 第十轮（首次真实跨模型冒烟，2026-10-30）
+
+配置：judge=deepseek-v4-pro（同厂商换模型，避开同模型自偏好；自检如实报同厂商）。
+
+| # | 发现 | 级别 | 状态 | 落点 |
+|---|---|---|---|---|
+| 成功率 0% 与有报告 n=1 并列、degraded 题贴 no_report | succeeded 要求全绿，报告明明在——W6 全表成功率会长期 20~50% 且第一眼被打回 | **P1** | ✅ | 拆两列：有报告率/全绿率；flag 语义三分：no_report（真没报告）/ degraded（有报告子任务不全）/ run_failed |
+| GBK 控制台打 ¥ → UnicodeEncodeError → exit 1 | "一条命令出报告"的最后一厘米：报告落盘成功但脚本层失败 | **P0** | ✅ | `_safe_print`：UnicodeEncodeError → reconfigure(errors='replace') 重打（fake stdout 测试锁住） |
+| git status 遗留 eval/reports/ | 每跑一次留一个未跟踪文件 | P3 | ✅ | .gitignore 收整个目录 |
+| v4-pro 价目未登记 | judge 成本计 0 | P3 | ⏳ | 价目表留注释占位——按账单核对后填，不猜价 |
+| 132s/题 × 50×3 ≈ 5.5h | W6 全矩阵耗时 | P3 | ✅ | run_batch 加 `--jobs`（题间并发，默认 1 不影响既有测试） |
+
+三组真实冒烟结果（e001，全部 degraded 如实记录）：A0 忠实度 0.667/覆盖 0.333、
+A1 0.897/1.0、A2 0.857/0.667——**1 题样本无统计意义，但漏斗已经在讲真话**：
+A2 的 Verifier 通过率 100%（33/33）而 writer 只引 64%（21/33）——第一轮消融
+信号显示瓶颈可能在 writer 的引用取舍而非 verifier。judge 零解析失败，
+v4-pro 输出格式干净。
