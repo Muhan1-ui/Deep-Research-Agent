@@ -423,11 +423,20 @@ class TestNinthAudit:
         records = [
             rec("A2", "t001", "r-aaa", False),  # 旧跑失败
             rec("A2", "t001", "r-zzz", True),   # 重跑成功 → 采纳
+            # 第十五轮 P7：不同 dataset_version 是不同测量，不得互相覆盖
+            EvalRecord(
+                run_id="r-mmm", question_id="t001", config="A2",
+                code_version="t", prompt_version="p1", dataset_version="d2",
+                question="问题", question_type="fact_check", difficulty=2,
+                key_points=["a", "b", "c"], as_of_date=date(2026, 11, 1),
+                status=RunStatus.DEGRADED,
+                report=ReportArtifact(markdown="# 报告v2"),
+            ),
         ]
         from src.agent.config import Settings
         settings = Settings(llm_api_key="k", llm_model="fake-model")
         md = render_report(records, "ds.yaml", "abc", 1, settings, "t", [])
-        assert "| A2 | 1 " in md            # 不按运行次数加权（否则是 2）
+        assert "| A2 | 2 " in md            # 同题双版本共存（去重键含 dataset_version）
         assert "共同题集" not in md          # 单配置不渲染
 
     def test_common_table_shows_effective_n(self):

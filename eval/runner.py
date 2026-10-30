@@ -351,15 +351,16 @@ def _fmt(v: float | None, pct: bool = False) -> str:
 
 
 def _dedupe(records: list[EvalRecord]) -> list[EvalRecord]:
-    """按 (config, question_id) 保留 run_id 最新的一条（第十四轮 P2）。
+    """按 (config, question_id, dataset_version) 保留 run_id 最新的一条（第十四轮 P2）。
 
     重跑过的题按运行次数加权会稀释失败题的权重——结构防线不依赖
-    调用方记得加 --latest-only。
+    调用方记得加 --latest-only。dataset_version 入键：不同版本的题集
+    是不同的测量，不得互相覆盖（第十五轮 P7）。
     """
-    best: dict[tuple[str, str], EvalRecord] = {}
-    order: list[tuple[str, str]] = []
+    best: dict[tuple[str, str, str], EvalRecord] = {}
+    order: list[tuple[str, str, str]] = []
     for r in records:
-        key = (str(r.config.value), r.question_id)
+        key = (str(r.config.value), r.question_id, r.dataset_version)
         if key not in best:
             order.append(key)
         if key not in best or r.run_id > best[key].run_id:
@@ -371,11 +372,12 @@ def _metric_cell(values: list[float | None], pct: bool = False) -> str:
     """均值 + 有效样本数（第十四轮 P1）：None 被跳过时必须可见——
     'n=2 的 1.0' 和 'n=1 的 1.0' 不是同一个数，否则缺失数据偏差
     从跨配置下沉到跨题。"""
-    vals = [v for v in values if v is not None]
-    if not vals:
+    mean = _mean(values)
+    if mean is None:
         return "n/a"
-    base = f"{sum(vals) / len(vals):.0%}" if pct else f"{sum(vals) / len(vals):.4g}"
-    return base if len(vals) == len(values) else f"{base}(n={len(vals)})"
+    n_eff = len([v for v in values if v is not None])  # 复用 _mean 口径（第十五轮 P6）
+    base = f"{mean:.0%}" if pct else f"{mean:.4g}"
+    return base if n_eff == len(values) else f"{base}(n={n_eff})"
 
 
 def render_report(
@@ -440,6 +442,8 @@ def render_report(
         "成本为估算价（researcher/strong/judge 分档），"
         + (f"未登记价目：{','.join(unpriced)}（计 0 不代表免费）。" if unpriced else "")
         + "judge token 在逐题明细单列。"
+        "指标列的 (n=k) 后缀表示该均值只基于 k 个有效样本、其余为数据缺口"
+        "（第十五轮 P5 图例）——n 与总题数的差就是被跳过的 None。"
         "judge 档位见首行；强制思考的厂商（如 GLM-5.3）下 temperature 仅尽力而为，"
         "确定性以校准重测一致性为准。",
         "",
