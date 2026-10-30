@@ -510,6 +510,12 @@ class EvalRecord(Contract):
         "只写'用了 DeepSeek'不算记录，模型名不带日期后缀就无法复现。",
     )
     judge_model: str = Field(default="unknown", description="评分模型 id。")
+    judge_effort: str | None = Field(
+        default=None,
+        description="judge 思考档位（GLM: low/high/max）。与 judge_model 一起构成复现参数——"
+        "校准实测 low 档会忽略 rubric 边界规则（同批 30 条 27/30），high 档 28/30，"
+        "不记录档位的分数不可比。",
+    )
     producer_vendors: list[str] = Field(
         default_factory=list, description="生产链路用到的厂商（如 ['deepseek']）。用于同源偏差自检。"
     )

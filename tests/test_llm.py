@@ -242,3 +242,49 @@ class TestWireBodyAssembly:
         # （与 extra_body 的不对称正是 auto bug 的根源）
         body, _ = self._run()
         assert "temperature" not in body
+
+
+class TestGlmVendorMapping:
+    """GLM-5.3-Flash 强制思考：disabled 会被 400（错误码 1210），
+
+    实测唯一有效的档位开关是 reasoning_effort=low/high/max；
+    `{"thinking": {"type": "low"}}` 反而 400。这里钉死厂商分流。
+    """
+
+    GLM = "https://open.bigmodel.cn/api/paas/v4"
+
+    def _body(self, **settings_kw):
+        bodies: list = []
+        client = LLMClient(
+            Settings(llm_api_key="k", llm_model="glm-5.3-flash",
+                     llm_base_url=self.GLM, **settings_kw),
+            client=sdk_wire_client(bodies),
+        )
+        asyncio.run(client.complete([{"role": "user", "content": "hi"}]))
+        return bodies[0]
+
+    def test_disabled_degrades_to_low_effort(self):
+        body = self._body()  # 默认 disabled
+        assert body["reasoning_effort"] == "low"
+        assert "thinking" not in body  # 发 thinking 会 400
+
+    def test_enabled_maps_to_high(self):
+        body = self._body(llm_thinking="enabled")
+        assert body["reasoning_effort"] == "high"
+
+    def test_explicit_high_passthrough(self):
+        body = self._body(llm_thinking="high")
+        assert body["reasoning_effort"] == "high"
+
+    def test_auto_sends_neither(self):
+        body = self._body(llm_thinking="auto")
+        assert "reasoning_effort" not in body and "thinking" not in body
+
+    def test_deepseek_still_uses_thinking_field(self):
+        bodies: list = []
+        client = LLMClient(
+            Settings(llm_api_key="k", llm_model="deepseek-flash"),
+            client=sdk_wire_client(bodies),
+        )
+        asyncio.run(client.complete([{"role": "user", "content": "hi"}]))
+        assert bodies[0]["thinking"] == {"type": "disabled"}

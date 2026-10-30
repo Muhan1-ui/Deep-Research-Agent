@@ -1,0 +1,126 @@
+{
+  "sheet": "sheet-202610300205.json",
+  "judge_model": "glm-5.3-flash#j1",
+  "labels": {
+    "run-20261030015634-2eec31:SQ2:002": {
+      "label": "supported",
+      "note": ""
+    },
+    "run-20261030020200-ad191f:SQ5:009": {
+      "label": "supported",
+      "note": ""
+    },
+    "run-20261030015634-2eec31:SQ4:005": {
+      "label": "supported",
+      "note": ""
+    },
+    "run-20261030014605-dd0e7c:SQ4:002": {
+      "label": "supported",
+      "note": ""
+    },
+    "run-20261030014920-151261:SQ3:006": {
+      "label": "supported",
+      "note": ""
+    },
+    "run-20261030015106-cb2a5c:SQ5:006": {
+      "label": "partial",
+      "note": "quote 未含'未知或未来的行为者'与'公共信号'两层"
+    },
+    "run-20261030015106-cb2a5c:SQ4:003": {
+      "label": "partial",
+      "note": "孤儿作品的定义句不在 quote 内，仅结论被蕴含"
+    },
+    "run-20261030015634-2eec31:SQ3:004": {
+      "label": "supported",
+      "note": ""
+    },
+    "run-20261030015406-d4afbe:SQ1:005": {
+      "label": "supported",
+      "note": ""
+    },
+    "run-20261030015106-cb2a5c:SQ3:009": {
+      "label": "partial",
+      "note": "Bartz 与简易判决阶段不在 quote 内"
+    },
+    "run-20261030015406-d4afbe:SQ6:001": {
+      "label": "partial",
+      "note": "'建议作为最小可行基线'是论文结论，quote 未写"
+    },
+    "run-20261030015904-3771c3:SQ4:009": {
+      "label": "supported",
+      "note": ""
+    },
+    "run-20261030014820-897e38:SQ6:010": {
+      "label": "partial",
+      "note": "RFC 9204 不在 quote（quote 出自 RFC 9114）"
+    },
+    "run-20261030015106-cb2a5c:SQ5:003": {
+      "label": "supported",
+      "note": ""
+    },
+    "run-20261030014605-296e59:SQ5:005": {
+      "label": "supported",
+      "note": ""
+    },
+    "run-20261030014920-151261:SQ5:003": {
+      "label": "supported",
+      "note": ""
+    },
+    "run-20261030020200-ad191f:SQ5:005": {
+      "label": "supported",
+      "note": ""
+    },
+    "run-20261030014605-296e59:SQ2:007": {
+      "label": "supported",
+      "note": ""
+    },
+    "run-20261030015904-3771c3:SQ6:009": {
+      "label": "partial",
+      "note": "'更新/删除均原子'由同事务推断，quote 只说 same transaction"
+    },
+    "run-20261030014920-151261:SQ3:002": {
+      "label": "supported",
+      "note": ""
+    },
+    "run-20261030014820-897e38:SQ1:001": {
+      "label": "partial",
+      "note": "初始草案名与起源不在 quote（quote 只有 adopted as base）"
+    },
+    "run-20261030015904-3771c3:SQ5:001": {
+      "label": "partial",
+      "note": "'看现有基础设施/不看基准'是转述，quote 只说 constraints"
+    },
+    "run-20261030014605-dd0e7c:SQ6:002": {
+      "label": "partial",
+      "note": "'这是选型的核心矛盾'是编者评价，quote 未写"
+    },
+    "run-20261030014820-897e38:SQ6:005": {
+      "label": "supported",
+      "note": "RFC 9002 即 quote 所属文档本身"
+    },
+    "run-20261030014605-296e59:SQ5:002": {
+      "label": "partial",
+      "note": "PEP 779 不在 quote，且该页不是 PEP 779 文档"
+    },
+    "run-20261030015106-cb2a5c:SQ6:003": {
+      "label": "partial",
+      "note": "新加坡/欧盟'最有利'一句不在 quote 内"
+    },
+    "run-20261030015634-2eec31:SQ6:008": {
+      "label": "partial",
+      "note": "主管机关/通报/联系方式和日期调整都不在 quote 内"
+    },
+    "run-20261030015106-cb2a5c:SQ3:010": {
+      "label": "partial",
+      "note": "quote 截断于 minimal time and creativity，市场稀释/激励论证不在内"
+    },
+    "run-20261030020058-60c40a:SQ5:008": {
+      "label": "partial",
+      "note": "2024 AGPL 与'不删除既有选项'不在 quote 内"
+    },
+    "run-20261030015634-2eec31:SQ3:001": {
+      "label": "supported",
+      "note": "'These obligations' 即该页 GPAI 义务，指代无歧义"
+    }
+  }
+}

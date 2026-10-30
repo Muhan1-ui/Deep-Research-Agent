@@ -1,4 +1,4 @@
-"""评测 judge：跨厂商 LLM-as-judge（W5）。
+﻿"""评测 judge：跨厂商 LLM-as-judge（W5）。
 
 两个判定任务，共用"只依据给定材料、不用外部知识"的 rubric：
 1. 忠实度：被引用的 (text, quote) 对 → supported / partial / unsupported；
@@ -23,6 +23,11 @@ from src.agent.schemas import Claim, ClaimJudgment, KeyPointHit, ReportArtifact
 
 BATCH = 12
 
+# judge rubric 版本：随提示词实质变更递增，记录为 ClaimJudgment.judge_model 的 "model#j2"。
+# j2（第三轮校准）：补两条边界规则——引文外的编号/名称算 partial（引文自身文档编号除外）、
+# 对引文主语的无歧义指代不算新增信息。校准中 3/3 分歧都落在这条边界上。
+JUDGE_PROMPT_VERSION = "j2"
+
 # 系统提示首句的判别标记：测试与调试靠它区分两类判定调用
 FAITH_MARKER = "评测裁判（忠实度）"
 COVER_MARKER = "评测裁判（覆盖率）"
@@ -33,6 +38,10 @@ FAITH_PROMPT = f"""你是{FAITH_MARKER}，与被评系统来自不同厂商。�
 - partial：引文只支持论断的一部分，或支持力度弱
 - unsupported：引文不支持论断
 只依据引文本身判断，禁止使用你的外部知识；引文没有的信息视为论断没有依据。
+两条边界规则：
+- 编号/名称：论断出现引文里没有的编号、案号、机构名等 → partial；
+  但若该编号就是本条引文所属文档自身的编号（引文出自 RFC 9002、论断写“RFC 9002”），不算新增信息。
+- 指代：论断用“该义务 / 该判决 / 这两者”指代引文中的主语，只要指代无歧义，不算新增信息。
 只输出 JSON 数组，每项形如 {{"claim_id": "...", "label": "supported|partial|unsupported", "rationale": "一句话"}}，
 逐条对应输入，不要遗漏。"""
 
@@ -63,7 +72,7 @@ def _parse_faith(text: str, expected: set[str]) -> dict[str, str]:
 
 async def judge_cited_claims(
     llm, claims: list[Claim], report: ReportArtifact,
-    judge_model: str, prompt_version: str = "j1", max_retries: int = 1,
+    judge_model: str, prompt_version: str = JUDGE_PROMPT_VERSION, max_retries: int = 1,
 ) -> list[ClaimJudgment]:
     """对报告实际引用的论断逐条判定（忠实度分母的唯一来源）。"""
     by_id = {c.claim_id: c for c in claims}
@@ -139,7 +148,7 @@ def _parse_cover(text: str, n_points: int) -> list[dict] | None:
 
 async def judge_key_points(
     llm, question: str, key_points: list[str], report: ReportArtifact,
-    claims: list[Claim], judge_model: str, prompt_version: str = "j1",
+    claims: list[Claim], judge_model: str, prompt_version: str = JUDGE_PROMPT_VERSION,
     max_retries: int = 1,
 ) -> tuple[list[KeyPointHit], list[str]]:
     """要点覆盖 + 检索命中（漏斗①与覆盖率共用这份数据）。

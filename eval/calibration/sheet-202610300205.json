@@ -1,0 +1,187 @@
+{
+  "generated": "202610300205",
+  "judge_model": "glm-5.3-flash#j1",
+  "n": 30,
+  "items": [
+    {
+      "question_id": "e017",
+      "claim_id": "run-20261030015634-2eec31:SQ2:002",
+      "stratum": "random",
+      "judge_label": "supported"
+    },
+    {
+      "question_id": "e020",
+      "claim_id": "run-20261030020200-ad191f:SQ5:009",
+      "stratum": "random",
+      "judge_label": "supported"
+    },
+    {
+      "question_id": "e017",
+      "claim_id": "run-20261030015634-2eec31:SQ4:005",
+      "stratum": "random",
+      "judge_label": "supported"
+    },
+    {
+      "question_id": "e012",
+      "claim_id": "run-20261030014605-dd0e7c:SQ4:002",
+      "stratum": "random",
+      "judge_label": "supported"
+    },
+    {
+      "question_id": "e014",
+      "claim_id": "run-20261030014920-151261:SQ3:006",
+      "stratum": "random",
+      "judge_label": "supported"
+    },
+    {
+      "question_id": "e015",
+      "claim_id": "run-20261030015106-cb2a5c:SQ5:006",
+      "stratum": "random",
+      "judge_label": "partial"
+    },
+    {
+      "question_id": "e015",
+      "claim_id": "run-20261030015106-cb2a5c:SQ4:003",
+      "stratum": "random",
+      "judge_label": "partial"
+    },
+    {
+      "question_id": "e017",
+      "claim_id": "run-20261030015634-2eec31:SQ3:004",
+      "stratum": "random",
+      "judge_label": "supported"
+    },
+    {
+      "question_id": "e016",
+      "claim_id": "run-20261030015406-d4afbe:SQ1:005",
+      "stratum": "random",
+      "judge_label": "supported"
+    },
+    {
+      "question_id": "e015",
+      "claim_id": "run-20261030015106-cb2a5c:SQ3:009",
+      "stratum": "random",
+      "judge_label": "partial"
+    },
+    {
+      "question_id": "e016",
+      "claim_id": "run-20261030015406-d4afbe:SQ6:001",
+      "stratum": "random",
+      "judge_label": "partial"
+    },
+    {
+      "question_id": "e018",
+      "claim_id": "run-20261030015904-3771c3:SQ4:009",
+      "stratum": "random",
+      "judge_label": "supported"
+    },
+    {
+      "question_id": "e013",
+      "claim_id": "run-20261030014820-897e38:SQ6:010",
+      "stratum": "random",
+      "judge_label": "supported"
+    },
+    {
+      "question_id": "e015",
+      "claim_id": "run-20261030015106-cb2a5c:SQ5:003",
+      "stratum": "random",
+      "judge_label": "supported"
+    },
+    {
+      "question_id": "e011",
+      "claim_id": "run-20261030014605-296e59:SQ5:005",
+      "stratum": "random",
+      "judge_label": "supported"
+    },
+    {
+      "question_id": "e014",
+      "claim_id": "run-20261030014920-151261:SQ5:003",
+      "stratum": "random",
+      "judge_label": "supported"
+    },
+    {
+      "question_id": "e020",
+      "claim_id": "run-20261030020200-ad191f:SQ5:005",
+      "stratum": "random",
+      "judge_label": "supported"
+    },
+    {
+      "question_id": "e011",
+      "claim_id": "run-20261030014605-296e59:SQ2:007",
+      "stratum": "random",
+      "judge_label": "supported"
+    },
+    {
+      "question_id": "e018",
+      "claim_id": "run-20261030015904-3771c3:SQ6:009",
+      "stratum": "random",
+      "judge_label": "partial"
+    },
+    {
+      "question_id": "e014",
+      "claim_id": "run-20261030014920-151261:SQ3:002",
+      "stratum": "random",
+      "judge_label": "supported"
+    },
+    {
+      "question_id": "e013",
+      "claim_id": "run-20261030014820-897e38:SQ1:001",
+      "stratum": "enriched_non_supported",
+      "judge_label": "partial"
+    },
+    {
+      "question_id": "e018",
+      "claim_id": "run-20261030015904-3771c3:SQ5:001",
+      "stratum": "enriched_non_supported",
+      "judge_label": "partial"
+    },
+    {
+      "question_id": "e012",
+      "claim_id": "run-20261030014605-dd0e7c:SQ6:002",
+      "stratum": "enriched_non_supported",
+      "judge_label": "partial"
+    },
+    {
+      "question_id": "e013",
+      "claim_id": "run-20261030014820-897e38:SQ6:005",
+      "stratum": "enriched_non_supported",
+      "judge_label": "partial"
+    },
+    {
+      "question_id": "e011",
+      "claim_id": "run-20261030014605-296e59:SQ5:002",
+      "stratum": "enriched_non_supported",
+      "judge_label": "partial"
+    },
+    {
+      "question_id": "e015",
+      "claim_id": "run-20261030015106-cb2a5c:SQ6:003",
+      "stratum": "enriched_non_supported",
+      "judge_label": "partial"
+    },
+    {
+      "question_id": "e017",
+      "claim_id": "run-20261030015634-2eec31:SQ6:008",
+      "stratum": "enriched_non_supported",
+      "judge_label": "partial"
+    },
+    {
+      "question_id": "e015",
+      "claim_id": "run-20261030015106-cb2a5c:SQ3:010",
+      "stratum": "enriched_non_supported",
+      "judge_label": "partial"
+    },
+    {
+      "question_id": "e019",
+      "claim_id": "run-20261030020058-60c40a:SQ5:008",
+      "stratum": "enriched_non_supported",
+      "judge_label": "partial"
+    },
+    {
+      "question_id": "e017",
+      "claim_id": "run-20261030015634-2eec31:SQ3:001",
+      "stratum": "enriched_non_supported",
+      "judge_label": "partial"
+    }
+  ]
+}

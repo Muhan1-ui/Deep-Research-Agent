@@ -4,7 +4,13 @@ import asyncio
 import json
 from datetime import date
 
-from eval.judge.judge import FAITH_MARKER, judge_cited_claims, judge_key_points
+from eval.judge.judge import (
+    FAITH_MARKER,
+    FAITH_PROMPT,
+    JUDGE_PROMPT_VERSION,
+    judge_cited_claims,
+    judge_key_points,
+)
 from src.agent.schemas import Claim, ClaimJudgment, ReportArtifact, SupportLabel
 from tests.conftest import SmartFakeLLM, final
 
@@ -72,7 +78,7 @@ class TestJudgeCitedClaims:
         llm = SmartFakeLLM([faith_handle(), faith_handle()])
         js = run(judge_cited_claims(llm, claims, report_with({1: "r:S:1", 2: "r:S:2"}), "judge-x"))
         assert [j.judge_label for j in js] == [SupportLabel.SUPPORTED] * 2
-        assert all(j.judge_model == "judge-x#j1" for j in js)
+        assert all(j.judge_model == f"judge-x#{JUDGE_PROMPT_VERSION}" for j in js)
         assert llm.kwargs[0].get("temperature") == 0.0  # judge 必须 temp=0
 
     def test_batching_and_missing_verdict_is_gap(self):
@@ -172,3 +178,17 @@ class TestJudgeKeyPoints:
         run(judge_key_points(llm, "问题", ["要点一"],
                              report_with({1: "r:S:1"}), [claim("r:S:1")], "j"))
         assert llm.kwargs[0].get("temperature") == 0.0
+
+
+class TestFaithPromptBoundaryRules:
+    """j2 的两条边界规则不能悄悄丢：校准里 3/3 分歧都落在"引文外编号/指代"。"""
+
+    def test_identifier_rule_present(self):
+        assert "RFC 9002" in FAITH_PROMPT          # 引文自身编号的例外
+        assert "案号" in FAITH_PROMPT              # 引文外编号 → partial
+
+    def test_referent_rule_present(self):
+        assert "指代" in FAITH_PROMPT
+
+    def test_version_bumped(self):
+        assert JUDGE_PROMPT_VERSION == "j2"

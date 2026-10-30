@@ -10,11 +10,14 @@ from eval.runner import (
     build_record,
     estimate_cost,
     git_version,
+    latest_per_question,
     load_dataset,
+    make_judge_llm,
     render_report,
     run_batch,
     vendor_of,
 )
+from src.agent.config import Settings
 from src.agent.llm import LLMResult, ToolCallRequest
 from src.agent.schemas import RunStatus
 from src.agent.storage.db import Database
@@ -172,6 +175,7 @@ class TestA2Record:
         # resp.model 真身进 model_snapshots / judge_model（第十一轮：钉版本）
         assert set(record.model_snapshots.values()) == {"mock-flash-1017"}
         assert record.judge_model == "mock-judge-1017"
+        assert record.judge_effort == "high"  # judge 档位进记录（复现参数）
         assert record.faithfulness == 1.0
         assert record.coverage == pytest.approx(1 / 3, abs=1e-3)
         f = record.funnel()
@@ -202,7 +206,18 @@ class TestRenderAndBatch:
         assert "| A2 |" in md
         assert "忠实度" in md and "覆盖率" in md and "F1" in md   # 成对输出
         assert "同源偏差自检：OK" in md
+        assert "judge 档位：high" in md  # 档位进报告头（复现参数）
         assert "judge" in md  # judge 厂商标识出现在报告头
+
+        # 同表混用 judge 配置时必须显式告警，别让读者以为数字可比
+        other = rec.model_copy(update={"judge_effort": "low"})
+        md2 = render_report([rec, other], "ds.yaml", "abc12345", 1, settings, "t", [])
+        assert "配置混用" in md2 and "low" in md2
+
+        # 重跑单题后 latest-only 只留最新一条（按 rowid 升序 → 后者）
+        old = rec.model_copy(update={"question_id": "q1", "code_version": "old"})
+        new = rec.model_copy(update={"question_id": "q1", "code_version": "new"})
+        assert latest_per_question([old, new]) == [new]
 
     def test_run_batch_writes_report_and_persists(self, tmp_path, monkeypatch):
         from tests.test_fetch import URL, mocked_client
@@ -400,3 +415,22 @@ class TestNinthAudit:
         assert len(records) == 2
         assert all(r.status is RunStatus.FAILED for r in records)
         assert list((tmp_path / "eval" / "reports").glob("eval-*.md"))
+
+
+class TestJudgeEffortWiring:
+    """judge 档位独立于 producer：GLM 强制思考，disabled 会 400（llm.thinking_body）。"""
+
+    def _judge(self, **kw):
+        s = Settings(judge_api_key="jk", judge_model="glm-5.3-flash",
+                     judge_base_url="https://open.bigmodel.cn/api/paas/v4", **kw)
+        return make_judge_llm(s)
+
+    def test_default_high(self):
+        assert self._judge()._s.llm_thinking == "high"
+
+    def test_explicit_low(self):
+        assert self._judge(judge_thinking="low")._s.llm_thinking == "low"
+
+    def test_producer_setting_not_leaked(self):
+        # 生产链路 disabled（DeepSeek 关思考）不能覆盖 judge 档位
+        assert self._judge(llm_thinking="disabled")._s.llm_thinking == "high"

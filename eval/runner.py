@@ -54,7 +54,7 @@ from src.agent.schemas import (
 from src.agent.storage.db import Database
 
 # prompt 版本拆分（第九轮审计）：生产链路与 judge 各自演进，改一个字各 +1。
-# judge 版本随 ClaimJudgment.judge_model 标签（"model#j1"）传递，不占这个字段。
+# judge 版本随 ClaimJudgment.judge_model 标签（"model#j2"）传递，不占这个字段。
 PRODUCER_PROMPT_VERSION = "p1"
 
 A0_PROMPT = """你是研究助手（单 Agent 基线模式）。自行决定是否调用 web_search / fetch_page 完成研究，然后：
@@ -66,10 +66,13 @@ A0_PROMPT = """你是研究助手（单 Agent 基线模式）。自行决定是�
 # 估算价目（CNY / M tokens，(input, output)）：deepseek-flash 2026-10 牌价估算，
 # 以厂商账单为准核对后调整；未登记的模型成本记 0（token 数始终如实）
 PRICE_CNY_PER_MTOK: dict[str, tuple[float, float]] = {
-    "deepseek-flash": (1.0, 4.0),  # = DeepSeek-V4.1-Flash-1017；judge 与生产共用
+    "deepseek-flash": (1.0, 4.0),  # = DeepSeek-V4.1-Flash-1017，producer 链路
     # 备用：若把 judge 换成 deepseek-v4-pro（官方牌价 2026-10，cache miss、非高峰
     # $0.66/M in、$1.98/M out，按与 flash 相同汇率折算 → ¥4.4 / ¥13.2；高峰翻倍）
     "deepseek-v4-pro": (4.4, 13.2),
+    # judge：GLM-5.3-Flash 官方牌价 2026-10（¥0.8 / ¥2.8，cache hit ¥0.23）——
+    # 不是免费额度；旧 glm-4-flash 已不在模型列表里
+    "glm-5.3-flash": (0.8, 2.8),
 }
 
 
@@ -132,6 +135,8 @@ def make_judge_llm(settings: Settings) -> LLMClient:
         "llm_api_key": settings.judge_api_key,
         "llm_base_url": settings.judge_base_url or settings.llm_base_url,
         "llm_model": settings.judge_model,
+        # judge 档位独立于 producer：GLM 强制思考，disabled 会 400（见 llm.thinking_body）
+        "llm_thinking": settings.judge_thinking,
     })
     return LLMClient(judge_settings)
 
@@ -289,6 +294,7 @@ async def build_record(
             for role in ("planner", "researcher", "verifier", "writer")
         },
         judge_model=jtrap.model or settings.judge_model or "unknown",
+        judge_effort=settings.judge_thinking,
         producer_vendors=[vendor_of(settings.llm_base_url)],
         # base_url 留空时 judge 实际回落到生产 base_url（见 make_judge_llm）——
         # vendor 必须回落成真名，让同厂商跑批被自检抓到，而不是 "unknown" 静默放行
@@ -329,6 +335,8 @@ def render_report(
     priced_models = {settings.llm_model, settings.strong_llm_model or settings.llm_model,
                      settings.judge_model or ""}
     unpriced = sorted(m for m in priced_models if m and m not in PRICE_CNY_PER_MTOK)
+    mixes = sorted({f"{r.judge_model}#{r.judge_effort or '?'}" for r in records})
+    mixed_judges = len({(r.judge_model, r.judge_effort) for r in records}) > 1
     lines = [
         f"# 评测报告 {ts}", "",
         f"- 数据集：`{dataset_path}`（v{dataset_version}，n={n_questions}）"
@@ -336,8 +344,11 @@ def render_report(
         f"　code：`{code_version}`　producer prompt：{PRODUCER_PROMPT_VERSION}",
         f"- judge：{settings.judge_model or 'unknown'}"
         f"（{vendor_of(settings.judge_base_url or settings.llm_base_url)}）"
+        f"　judge 档位：{','.join(sorted({r.judge_effort or '未记录' for r in records}))}"
         f"　producer：{','.join(sorted({v for r in records for v in r.producer_vendors}))}",
         f"- 同源偏差自检：{'；'.join(warnings) if warnings else 'OK（judge 与生产链路跨厂商）'}",
+        *([f"- ⚠ 配置混用：{', '.join(mixes)}——同表跨 judge 配置不可比"
+           "（加 --latest-only 或整表重跑）"] if mixed_judges else []),
         "",
         "| 配置 | n | 有报告n | 有报告率 | 全绿率 | 忠实度 | 覆盖率 | F1 | 检索命中 | 抽取Σ | 未核验 | 引用率 | tokens(in/out) | 成本¥ | 墙钟s |",
         "|---|---|---|---|---|---|---|---|---|---|---|---|---|---|---|",
@@ -368,7 +379,9 @@ def render_report(
         "均值只在'有值'样本上计算。通过率/未核验仅对 A2 有意义。"
         "成本为估算价（researcher/strong/judge 分档），"
         + (f"未登记价目：{','.join(unpriced)}（计 0 不代表免费）。" if unpriced else "")
-        + "judge token 在逐题明细单列。",
+        + "judge token 在逐题明细单列。"
+        "judge 档位见首行；强制思考的厂商（如 GLM-5.3）下 temperature 仅尽力而为，"
+        "确定性以校准重测一致性为准。",
         "",
         "## 逐题明细", "",
     ]
@@ -470,11 +483,24 @@ def _write_report(md: str) -> Path:
     return out
 
 
-def render_from_db(settings: Settings, dataset_path: str = "(from-db)") -> str:
+def latest_per_question(records: list[EvalRecord]) -> list[EvalRecord]:
+    """同一 (config, question) 重跑多次时只留最后一条。
+
+    load_eval_records 按 rowid 升序返回，所以"最后一条"= 最新一次运行。
+    重跑单题做冒烟后，不筛就会让同一题在汇总表里出现两行、均值被重复计数。
+    """
+    keep = {(str(r.config.value), r.question_id): r for r in records}
+    return [r for r in records if keep[(str(r.config.value), r.question_id)] is r]
+
+
+def render_from_db(settings: Settings, dataset_path: str = "(from-db)",
+                   latest_only: bool = False) -> str:
     """从 eval_records 表重渲染汇总——跑批中断/补题后不必重跑。"""
     db = Database(settings.database_path)
     recs = db.load_eval_records()
     db.close()
+    if latest_only:
+        recs = latest_per_question(recs)
     if not recs:
         raise SystemExit("eval_records 为空：先跑批再渲染")
     warnings = sorted({w for r in recs for w in r.check_judge_independence()})
@@ -495,10 +521,12 @@ def main() -> None:
     parser.add_argument("--jobs", type=int, default=1, help="题间并发（W6 全矩阵可开 2~3）")
     parser.add_argument("--report-only", action="store_true",
                         help="不跑批：从 eval_records 表重渲染汇总报告")
+    parser.add_argument("--latest-only", action="store_true",
+                        help="配合 --report-only：同 (config, 题) 只保留最后一次运行")
     args = parser.parse_args()
     settings = Settings()
     if args.report_only:
-        md = render_from_db(settings, args.dataset)
+        md = render_from_db(settings, args.dataset, latest_only=args.latest_only)
     else:
         md, records = asyncio.run(run_batch(
             args.dataset, args.configs, settings,

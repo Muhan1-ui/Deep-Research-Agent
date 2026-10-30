@@ -26,15 +26,28 @@ RETRYABLE_EXCEPTIONS = (
 )
 
 
-def thinking_body(mode: str | None) -> dict | None:
-    """思考开关 → extra_body 映射（当前语法 = DeepSeek，已用 /models 接口核对型号）。
+GLM_EFFORT = {"disabled": "low", "low": "low", "enabled": "high",
+              "high": "high", "max": "max"}
 
-    ⚠ 不要假设厂商同构：GLM-5.3 没有 disabled 档（只有 low/high/max 效率档），
-    W5 judge 接 GLM 时这里必须改成按厂商的映射表。None/"auto" = 不干预。
-    注意只能返回 None 或 dict——extra_json 路径只判 None，NOT_GIVEN 会 TypeError。
+
+def thinking_body(mode: str | None, base_url: str | None = None) -> dict | None:
+    """思考开关 → extra_body 映射，按厂商分流（不再假设厂商同构）。
+
+    DeepSeek：{"thinking": {"type": mode}}，disabled 可真正关掉。
+    GLM-5.3/5.3-Flash：**强制思考，disabled 会被 400 拒绝**（错误码 1210：
+    "不支持关闭思考，请使用 low/high/max"）；实测 low/high/max 走的是
+    `reasoning_effort` 字段（`{"thinking": {"type": "low"}}` 反而 400）。
+    所以 GLM 侧把 disabled 降级为低档思考 low——temperature=0 因此**不保证
+    完全生效**，judge 的确定性只能靠校准里的重测一致性来量。
+
+    None/"auto" = 不干预。只能返回 None 或 dict——extra_json 路径只判 None，
+    NOT_GIVEN 会 TypeError。
     """
     if mode in (None, "", "auto"):
         return None
+    if "bigmodel" in (base_url or "").lower() or "zhipu" in (base_url or "").lower():
+        effort = GLM_EFFORT.get(mode)
+        return {"reasoning_effort": effort} if effort else None
     return {"thinking": {"type": mode}}
 
 
@@ -119,7 +132,7 @@ class LLMClient:
                     tools=tools if tools else NOT_GIVEN,
                     temperature=temperature if temperature is not None else NOT_GIVEN,
                     extra_body=extra_body if extra_body is not None
-                    else thinking_body(self._s.llm_thinking),
+                    else thinking_body(self._s.llm_thinking, self._s.llm_base_url),
                 )
                 break
             except RETRYABLE_EXCEPTIONS as e:
