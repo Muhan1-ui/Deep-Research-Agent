@@ -45,4 +45,4 @@ python app/gradio_ui.py
 - [x] W3 Planner + 并行 Researcher + SQLite WAL 落库 + JSONL trace（真实环境：6 子问题并行、54 claims、3 分钟）
 - [x] W4 Verifier + Writer（程序化 citation_map）+ A2 配置 + Gradio demo（真实环境：51 claims → 核验 35 supported → 报告引用 37）
 - [x] W5 评测 runner：`python -m eval.runner`（judge 跨厂商 temp=0、A0/A1/A2 批跑、漏斗+成对指标、eval_records 落库、汇总表落盘）；50 题数据集人工校对进行中
-- [ ] W6 消融 A0/A1/A2 + 人工抽检
+- [x] W6 消融全矩阵（10 题 × A0/A1/A2，数据集 v4d1c7846）：A0→A2 忠实度 0.50→0.70、覆盖率 0.78→0.90；judge 重测一致性 30/30，盲标表随仓库待补（docs/w6-report.md）
