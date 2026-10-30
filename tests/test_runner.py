@@ -367,6 +367,37 @@ class TestNinthAudit:
         db.close()
         md = render_report([rec], "ds.yaml", "abc", 1, settings, "t", [])
         assert "有报告率" in md and "全绿率" in md  # 两列拆开，成功率不再含糊
+        assert "共同题集" not in md  # 单配置无跨配置比较，不渲染该表
+
+    def test_render_common_subset_table(self):
+        """第十三轮：跨配置均值以共同题集为准——缺失数据偏差的结构性防线
+        （W6 实测：自有样本均值让 A0 vs A1 忠实度反转 5 分）。"""
+        from datetime import date
+
+        from src.agent.schemas import EvalRecord, ReportArtifact, RunStatus
+
+        def rec(cfg: str, qid: str, with_report: bool) -> EvalRecord:
+            return EvalRecord(
+                run_id=f"r-{cfg}-{qid}", question_id=qid, config=cfg,
+                code_version="t", prompt_version="p1", dataset_version="d",
+                question="问题", question_type="fact_check", difficulty=2,
+                key_points=["a", "b", "c"], as_of_date=date(2026, 11, 1),
+                status=RunStatus.DEGRADED,
+                report=ReportArtifact(markdown="# 报告") if with_report else None,
+            )
+
+        records = [
+            rec("A0", "t001", True), rec("A0", "t002", False),  # A0 缺 t002
+            rec("A2", "t001", True), rec("A2", "t002", True),
+        ]
+        from src.agent.config import Settings
+        settings = Settings(llm_api_key="k", llm_model="fake-model",
+                            judge_api_key="jk", judge_model="judge-model",
+                            judge_base_url="https://judge.example.com/v1")
+        md = render_report(records, "ds.yaml", "abc", 2, settings, "t", [])
+        assert "共同题集（1 题" in md  # 只有 t001 两方都有报告
+        # 主表 A0 n=2（含无报告），共同题集表 A0 n=1——分母差异可见
+        assert md.count("| A0 |") == 2 and md.count("| A2 |") == 2
 
     def test_safe_print_survives_gbk_console(self, monkeypatch):
         """P0：GBK 控制台打 ¥ → UnicodeEncodeError → 退出码 1。

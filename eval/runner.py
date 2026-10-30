@@ -378,25 +378,31 @@ def render_report(
         "| 配置 | n | 有报告n | 有报告率 | 全绿率 | 忠实度 | 覆盖率 | F1 | 检索命中 | 抽取Σ | 未核验 | 引用率 | tokens(in/out) | 成本¥ | 墙钟s |",
         "|---|---|---|---|---|---|---|---|---|---|---|---|---|---|---|",
     ]
-    for config in sorted({str(r.config.value) for r in records}):
-        rs = [r for r in records if str(r.config.value) == config]
-        funnels = [r.funnel() for r in rs]
-        lines.append(
-            f"| {config} | {len(rs)} "
-            f"| {sum(1 for r in rs if r.report is not None)} "
-            f"| {_fmt(_mean([1.0 if r.report is not None else 0.0 for r in rs]), pct=True)} "
-            f"| {_fmt(_mean([1.0 if r.succeeded else 0.0 for r in rs]), pct=True)} "
-            f"| {_fmt(_mean([r.faithfulness for r in rs]))} "
-            f"| {_fmt(_mean([r.coverage for r in rs]))} "
-            f"| {_fmt(_mean([r.f1 for r in rs]))} "
-            f"| {_fmt(_mean([f.retrieval_hit_rate for f in funnels]), pct=True)} "
-            f"| {sum(f.claims_extracted for f in funnels)} "
-            f"| {sum(f.claims_unverified for f in funnels)} "
-            f"| {_fmt(_mean([f.writer_citation_rate for f in funnels]), pct=True)} "
-            f"| {sum(r.total_tokens_in for r in rs)}+{sum(r.total_tokens_out for r in rs)} "
-            f"| {sum(r.cost_cny for r in rs):.2f} "
-            f"| {sum(r.wall_seconds for r in rs):.0f} |"
-        )
+    def _rows(rs: list[EvalRecord]) -> list[str]:
+        out = []
+        for config in sorted({str(r.config.value) for r in rs}):
+            per = [r for r in rs if str(r.config.value) == config]
+            funnels = [r.funnel() for r in per]
+            out.append(
+                f"| {config} | {len(per)} "
+                f"| {sum(1 for r in per if r.report is not None)} "
+                f"| {_fmt(_mean([1.0 if r.report is not None else 0.0 for r in per]), pct=True)} "
+                f"| {_fmt(_mean([1.0 if r.succeeded else 0.0 for r in per]), pct=True)} "
+                f"| {_fmt(_mean([r.faithfulness for r in per]))} "
+                f"| {_fmt(_mean([r.coverage for r in per]))} "
+                f"| {_fmt(_mean([r.f1 for r in per]))} "
+                f"| {_fmt(_mean([f.retrieval_hit_rate for f in funnels]), pct=True)} "
+                f"| {sum(f.claims_extracted for f in funnels)} "
+                f"| {sum(f.claims_unverified for f in funnels)} "
+                f"| {_fmt(_mean([f.writer_citation_rate for f in funnels]), pct=True)} "
+                f"| {sum(r.total_tokens_in for r in per)}+{sum(r.total_tokens_out for r in per)} "
+                f"| {sum(r.cost_cny for r in per):.2f} "
+                f"| {sum(r.wall_seconds for r in per):.0f} |"
+            )
+        return out
+
+    configs_all = sorted({str(r.config.value) for r in records})
+    lines += _rows(records)
     lines += [
         "",
         "注：有报告率=产出报告的题占比；全绿率=无任何子任务降级/失败的题占比"
@@ -408,8 +414,28 @@ def render_report(
         "judge 档位见首行；强制思考的厂商（如 GLM-5.3）下 temperature 仅尽力而为，"
         "确定性以校准重测一致性为准。",
         "",
-        "## 逐题明细", "",
     ]
+
+    # 共同题集表（第十三轮）：跨配置均值只在"所有配置都有报告"的题上可比——
+    # 自有样本均值会奖励失败多的配置（W6 实测：A0 vs A1 忠实度因此反转 5 分）。
+    # 这是结构性防线：50 题正式跑批时这个偏差在产物里不可能再悄悄出现。
+    if len(configs_all) >= 2:
+        by_q: dict[str, set[str]] = {}
+        for r in records:
+            if r.report is not None:
+                by_q.setdefault(r.question_id, set()).add(str(r.config.value))
+        common_q = {q for q, cs in by_q.items() if len(cs) == len(configs_all)}
+        if common_q:
+            common = [r for r in records
+                      if r.question_id in common_q and r.report is not None]
+            lines += [
+                f"### 共同题集（{len(common_q)} 题：所有配置都有报告——跨配置均值以此表为准）",
+                "",
+                "| 配置 | n | 有报告n | 有报告率 | 全绿率 | 忠实度 | 覆盖率 | F1 | 检索命中 | 抽取Σ | 未核验 | 引用率 | tokens(in/out) | 成本¥ | 墙钟s |",
+                "|---|---|---|---|---|---|---|---|---|---|---|---|---|---|---|",
+            ] + _rows(common) + [""]
+
+    lines += ["## 逐题明细", ""]
     for r in records:
         flags = ",".join(r.quality_flags()) or "-"
         lines.append(
