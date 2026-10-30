@@ -209,9 +209,11 @@ class TestRenderAndBatch:
         assert "judge 档位：high" in md  # 档位进报告头（复现参数）
         assert "judge" in md  # judge 厂商标识出现在报告头
 
-        # 同表混用 judge 配置时必须显式告警，别让读者以为数字可比
-        other = rec.model_copy(update={"judge_effort": "low"})
-        md2 = render_report([rec, other], "ds.yaml", "abc12345", 1, settings, "t", [])
+        # 同表混用 judge 配置时必须显式告警，别让读者以为数字可比。
+        # 注意用不同 question_id：同题不同档会被渲染层去重（第十四轮 P2
+        # 保留最新一条）——混用告警的语义是"跨题混档"，那才是真实风险。
+        other = rec.model_copy(update={"question_id": "q002", "judge_effort": "low"})
+        md2 = render_report([rec, other], "ds.yaml", "abc12345", 2, settings, "t", [])
         assert "配置混用" in md2 and "low" in md2
 
         # 重跑单题后 latest-only 只留最新一条（按 rowid 升序 → 后者）
@@ -376,9 +378,10 @@ class TestNinthAudit:
 
         from src.agent.schemas import EvalRecord, ReportArtifact, RunStatus
 
-        def rec(cfg: str, qid: str, with_report: bool) -> EvalRecord:
+        def rec(cfg: str, qid: str, with_report: bool,
+                run_id: str | None = None) -> EvalRecord:
             return EvalRecord(
-                run_id=f"r-{cfg}-{qid}", question_id=qid, config=cfg,
+                run_id=run_id or f"r-{cfg}-{qid}", question_id=qid, config=cfg,
                 code_version="t", prompt_version="p1", dataset_version="d",
                 question="问题", question_type="fact_check", difficulty=2,
                 key_points=["a", "b", "c"], as_of_date=date(2026, 11, 1),
@@ -396,8 +399,116 @@ class TestNinthAudit:
                             judge_base_url="https://judge.example.com/v1")
         md = render_report(records, "ds.yaml", "abc", 2, settings, "t", [])
         assert "共同题集（1 题" in md  # 只有 t001 两方都有报告
-        # 主表 A0 n=2（含无报告），共同题集表 A0 n=1——分母差异可见
-        assert md.count("| A0 |") == 2 and md.count("| A2 |") == 2
+        # 主表 A0 n=2（含无报告），共同题集表 A0 n=1——分母差异可见（P4：断 n 值）
+        assert "| A0 | 2 " in md and "| A2 | 2 " in md
+        assert "| A0 | 1 " in md and "| A2 | 1 " in md
+
+    def test_dedupe_keeps_latest_run(self):
+        """第十四轮 P2：重跑过的题按运行次数加权会稀释失败题权重——
+        渲染层内部去重，不依赖调用方记得加 --latest-only。"""
+        from datetime import date
+
+        from src.agent.schemas import EvalRecord, ReportArtifact, RunStatus
+
+        def rec(cfg: str, qid: str, run_id: str, with_report: bool) -> EvalRecord:
+            return EvalRecord(
+                run_id=run_id, question_id=qid, config=cfg,
+                code_version="t", prompt_version="p1", dataset_version="d",
+                question="问题", question_type="fact_check", difficulty=2,
+                key_points=["a", "b", "c"], as_of_date=date(2026, 11, 1),
+                status=RunStatus.DEGRADED,
+                report=ReportArtifact(markdown="# 报告") if with_report else None,
+            )
+
+        records = [
+            rec("A2", "t001", "r-aaa", False),  # 旧跑失败
+            rec("A2", "t001", "r-zzz", True),   # 重跑成功 → 采纳
+        ]
+        from src.agent.config import Settings
+        settings = Settings(llm_api_key="k", llm_model="fake-model")
+        md = render_report(records, "ds.yaml", "abc", 1, settings, "t", [])
+        assert "| A2 | 1 " in md            # 不按运行次数加权（否则是 2）
+        assert "共同题集" not in md          # 单配置不渲染
+
+    def test_common_table_shows_effective_n(self):
+        """第十四轮 P1：共同题集按'有报告'划集，但零引用报告的忠实度是
+        None——被 _mean 跳过必须以 (n=k) 可见，否则同一偏差从跨配置
+        下沉到跨题。"""
+        from datetime import date
+
+        from src.agent.schemas import (
+            Claim,
+            ClaimJudgment,
+            EvalRecord,
+            Finding,
+            ReportArtifact,
+            RunStatus,
+            SupportLabel,
+        )
+
+        def full(cfg: str, qid: str, cited: bool) -> EvalRecord:
+            c = Claim(claim_id=f"{cfg}:{qid}:001", sub_query_id=qid, text="论断",
+                      quote="引文", url="https://e.com",
+                      as_of_date=date(2026, 11, 1), extracted_by="m")
+            report = ReportArtifact(
+                markdown="# 报告" + ("[1]" if cited else ""),
+                citation_map={1: c.claim_id} if cited else {})
+            return EvalRecord(
+                run_id=f"r-{cfg}-{qid}", question_id=qid, config=cfg,
+                code_version="t", prompt_version="p1", dataset_version="d",
+                question="问题", question_type="fact_check", difficulty=2,
+                key_points=["a", "b", "c"], as_of_date=date(2026, 11, 1),
+                status=RunStatus.OK,
+                findings=[Finding(sub_query_id=qid, question="q",
+                                  status=RunStatus.OK, claims=[c])],
+                report=report,
+                judgments=[ClaimJudgment(claim_id=c.claim_id,
+                                         judge_label=SupportLabel.SUPPORTED,
+                                         judge_model="j")] if cited else [],
+            )
+
+        # A0 两题都有引用判定；A2 的 t001 零引用 → 忠实度 None
+        records = [
+            full("A0", "t001", True), full("A0", "t002", True),
+            full("A2", "t001", False), full("A2", "t002", True),
+        ]
+        from src.agent.config import Settings
+        settings = Settings(llm_api_key="k", llm_model="fake-model",
+                            judge_api_key="jk", judge_model="judge-model",
+                            judge_base_url="https://judge.example.com/v1")
+        md = render_report(records, "ds.yaml", "abc", 2, settings, "t", [])
+        assert "共同题集（2 题" in md
+        common_section = md.split("共同题集")[1]
+        # A2 忠实度均值只算 1 题，有效样本数必须可见
+        assert "(n=1)" in common_section
+        # A0 无缺口：不带 (n=) 后缀
+        a0_common = common_section.split("| A0 |")[1].splitlines()[0]
+        assert "(n=" not in a0_common
+
+    def test_common_empty_is_announced(self):
+        """第十四轮 P3：共同题集为空时输出说明行，不静默消失。"""
+        from datetime import date
+
+        from src.agent.schemas import EvalRecord, ReportArtifact, RunStatus
+
+        def rec(cfg: str, qid: str, with_report: bool) -> EvalRecord:
+            return EvalRecord(
+                run_id=f"r-{cfg}-{qid}", question_id=qid, config=cfg,
+                code_version="t", prompt_version="p1", dataset_version="d",
+                question="问题", question_type="fact_check", difficulty=2,
+                key_points=["a", "b", "c"], as_of_date=date(2026, 11, 1),
+                status=RunStatus.DEGRADED,
+                report=ReportArtifact(markdown="# 报告") if with_report else None,
+            )
+
+        records = [
+            rec("A2", "t001", True), rec("A2", "t002", True),
+            rec("A0", "t001", False), rec("A0", "t002", False),  # A0 全挂
+        ]
+        from src.agent.config import Settings
+        settings = Settings(llm_api_key="k", llm_model="fake-model")
+        md = render_report(records, "ds.yaml", "abc", 2, settings, "t", [])
+        assert "共同题集为空" in md and "跨配置均值不可比" in md
 
     def test_safe_print_survives_gbk_console(self, monkeypatch):
         """P0：GBK 控制台打 ¥ → UnicodeEncodeError → 退出码 1。

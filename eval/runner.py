@@ -350,11 +350,40 @@ def _fmt(v: float | None, pct: bool = False) -> str:
     return f"{v:.0%}" if pct else f"{v:.4g}"
 
 
+def _dedupe(records: list[EvalRecord]) -> list[EvalRecord]:
+    """按 (config, question_id) 保留 run_id 最新的一条（第十四轮 P2）。
+
+    重跑过的题按运行次数加权会稀释失败题的权重——结构防线不依赖
+    调用方记得加 --latest-only。
+    """
+    best: dict[tuple[str, str], EvalRecord] = {}
+    order: list[tuple[str, str]] = []
+    for r in records:
+        key = (str(r.config.value), r.question_id)
+        if key not in best:
+            order.append(key)
+        if key not in best or r.run_id > best[key].run_id:
+            best[key] = r
+    return [best[k] for k in order]
+
+
+def _metric_cell(values: list[float | None], pct: bool = False) -> str:
+    """均值 + 有效样本数（第十四轮 P1）：None 被跳过时必须可见——
+    'n=2 的 1.0' 和 'n=1 的 1.0' 不是同一个数，否则缺失数据偏差
+    从跨配置下沉到跨题。"""
+    vals = [v for v in values if v is not None]
+    if not vals:
+        return "n/a"
+    base = f"{sum(vals) / len(vals):.0%}" if pct else f"{sum(vals) / len(vals):.4g}"
+    return base if len(vals) == len(values) else f"{base}(n={len(vals)})"
+
+
 def render_report(
     records: list[EvalRecord], dataset_path: str, dataset_version: str,
     n_questions: int, settings: Settings, code_version: str, warnings: list[str],
 ) -> str:
     ts = datetime.now().astimezone().strftime("%Y-%m-%d %H:%M")
+    records = _dedupe(records)  # 第十四轮 P2：去重是渲染层的责任，不靠调用方
     priced_models = {settings.llm_model, settings.strong_llm_model or settings.llm_model,
                      settings.judge_model or ""}
     unpriced = sorted(m for m in priced_models if m and m not in PRICE_CNY_PER_MTOK)
@@ -388,9 +417,9 @@ def render_report(
                 f"| {sum(1 for r in per if r.report is not None)} "
                 f"| {_fmt(_mean([1.0 if r.report is not None else 0.0 for r in per]), pct=True)} "
                 f"| {_fmt(_mean([1.0 if r.succeeded else 0.0 for r in per]), pct=True)} "
-                f"| {_fmt(_mean([r.faithfulness for r in per]))} "
-                f"| {_fmt(_mean([r.coverage for r in per]))} "
-                f"| {_fmt(_mean([r.f1 for r in per]))} "
+                f"| {_metric_cell([r.faithfulness for r in per])} "
+                f"| {_metric_cell([r.coverage for r in per])} "
+                f"| {_metric_cell([r.f1 for r in per])} "
                 f"| {_fmt(_mean([f.retrieval_hit_rate for f in funnels]), pct=True)} "
                 f"| {sum(f.claims_extracted for f in funnels)} "
                 f"| {sum(f.claims_unverified for f in funnels)} "
@@ -434,6 +463,12 @@ def render_report(
                 "| 配置 | n | 有报告n | 有报告率 | 全绿率 | 忠实度 | 覆盖率 | F1 | 检索命中 | 抽取Σ | 未核验 | 引用率 | tokens(in/out) | 成本¥ | 墙钟s |",
                 "|---|---|---|---|---|---|---|---|---|---|---|---|---|---|---|",
             ] + _rows(common) + [""]
+        else:
+            # 第十四轮 P3：空集必须留痕，不能静默消失
+            lines += [
+                "", "共同题集为空：没有任何题在所有配置下都有报告——跨配置均值不可比，"
+                "跨配置结论只读主表的 有报告率/全绿率 与逐题明细。", "",
+            ]
 
     lines += ["## 逐题明细", ""]
     for r in records:
