@@ -32,7 +32,10 @@ class TavilySearch:
         else:
             async with httpx.AsyncClient(timeout=15) as c:
                 resp = await c.post(self.URL, json=payload)
-        resp.raise_for_status()
+        if resp.is_error:
+            # 带厂商原文片段：配额（432）/限流（429）/key 失效的判别信息都在
+            # body 里，raise_for_status 的消息只有状态行（第十六轮教训）
+            raise RuntimeError(f"HTTP {resp.status_code}: {resp.text[:200]}")
         results = resp.json().get("results") or []
         if not results:
             return f"(无搜索结果: {args.query})"

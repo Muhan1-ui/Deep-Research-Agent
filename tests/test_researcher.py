@@ -153,3 +153,30 @@ class TestResearchSubQuery:
             llm, registry, "runX", sub, resolver=fetcher, extracted_by="m"))
         assert finding.status is RunStatus.FAILED
         assert not finding.claims
+
+    def test_last_tool_error_flows_to_finding(self, tmp_path):
+        """第十六轮：工具错误原文必须落进 Finding.last_tool_error——
+        无人值守跑批失败时靠它区分配额/网络/key，而不是一个 streak 谜语。"""
+
+        class FailingSearchArgs(BaseModel):
+            query: str
+
+        async def quota_fail(args: FailingSearchArgs) -> str:
+            raise RuntimeError("HTTP 432: This request exceeds your plan's set usage limit.")
+
+        registry = ToolRegistry()
+        registry.register(Tool("web_search", "搜索", FailingSearchArgs, quota_fail))
+        fetcher = PageFetcher(tmp_path, client=mocked_client())
+        registry.register(Tool("fetch_page", "读网页", FetchPageArgs, fetcher))
+
+        llm = SmartFakeLLM([
+            LLMResult(content=None, tool_calls=[tc("t1", "web_search", '{"query": "x"}')]),
+            LLMResult(content="[]"),
+        ])
+        sub = SubQuery(sub_query_id="SQ9", question="q")
+        finding = run(research_sub_query(
+            llm, registry, "runX", sub, resolver=fetcher, extracted_by="m"))
+        assert finding.status is RunStatus.FAILED
+        assert finding.last_tool_error
+        assert "432" in finding.last_tool_error
+        assert "exceeds your plan" in finding.last_tool_error

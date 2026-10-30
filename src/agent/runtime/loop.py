@@ -35,6 +35,9 @@ class LoopResult:
     usage_in: int = 0
     usage_out: int = 0
     messages: list[dict] = field(default_factory=list)  # 完整对话，落库/trace 原料
+    # 最近工具错误原文（截断进 Finding.last_tool_error）——没有它，
+    # 无人值守跑批失败时无法区分配额/网络/key 失效（第十六轮）
+    tool_errors: list[str] = field(default_factory=list)
 
 
 class AgentLoop:
@@ -85,6 +88,9 @@ class AgentLoop:
             result.tool_calls_total += len(outcomes)
             errors = sum(o.is_error for o in outcomes)
             result.tool_errors_total += errors
+            for outcome in outcomes:
+                if outcome.is_error and len(result.tool_errors) < 20:
+                    result.tool_errors.append(outcome.content)
 
             # 只有"整轮全错"才累计：单工具失败可能是模型参数笔误，下一轮通常能自纠
             streak = streak + 1 if errors == len(outcomes) else 0

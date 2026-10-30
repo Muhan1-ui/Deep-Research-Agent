@@ -148,6 +148,10 @@ async def research_sub_query(
                 result = r2
 
     queries, fetches = _merged_tool_usage(rounds)
+    # 跨修复轮保留最后一次工具错误原文——配额/网络/key 的判别证据，
+    # 否则无人值守跑批失败时只剩 "tool_failure_streak" 一个谜语（第十六轮）
+    tool_errs = [e for rd in rounds for e in rd.tool_errors]
+    last_tool_error = tool_errs[-1][:200] if tool_errs else None
     if not built.claims:
         status = RunStatus.FAILED
         error = f"stop={result.stop_reason}; failures={len(failures)}"
@@ -168,5 +172,6 @@ async def research_sub_query(
         tokens_out=tokens_out,
         claims=built.claims,
         error=error,
+        last_tool_error=last_tool_error,
         elapsed_s=round(time.perf_counter() - t0, 3),
     )

@@ -182,6 +182,8 @@ async def run_research(
                     fetches=finding.pages_fetched,
                     tokens_in=finding.tokens_in, tokens_out=finding.tokens_out,
                     elapsed_s=finding.elapsed_s,
+                    # 诊断元数据：配额/网络/key 失效的判别证据进 trace（第十六轮）
+                    last_tool_error=(finding.last_tool_error or "")[:200],
                 )
                 return finding
 

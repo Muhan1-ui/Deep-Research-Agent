@@ -151,6 +151,17 @@ class TestErrorFeedback:
         result = run(AgentLoop(llm, make_registry(echo_tool())).run("s", "u"))
         assert result.tool_errors_total == 1
 
+    def test_tool_error_text_collected(self):
+        """第十六轮：错误原文要留存——无人值守跑批失败时靠它区分配额/网络/key。"""
+        llm = FakeLLM([
+            LLMResult(content=None, tool_calls=[tool_call("t1", "broken")]),
+            final("好了"),
+        ])
+        result = run(AgentLoop(llm, make_registry(broken_tool())).run("s", "u"))
+        assert result.tool_errors
+        assert "[TOOL_ERROR]" in result.tool_errors[-1]
+        assert "模拟的工具内部故障" in result.tool_errors[-1]  # 异步 gather 保持顺序
+
 
 class TestGuardrails:
     def test_error_streak_aborts(self):

@@ -85,7 +85,9 @@ class TestDatabase:
         finding = Finding(
             sub_query_id="SQ1", question="问题", status=RunStatus.DEGRADED,
             search_queries=["q1", "q2"], pages_fetched=2,
-            claims=[claim], error="部分失败", elapsed_s=1.5,
+            claims=[claim], error="部分失败",
+            last_tool_error="HTTP 432: exceeds plan usage limit",
+            elapsed_s=1.5,
         )
         run(db.save_run("runA", "问题", "A1"))
         run(db.save_finding("runA", finding))

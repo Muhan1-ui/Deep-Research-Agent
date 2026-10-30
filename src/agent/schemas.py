@@ -234,6 +234,11 @@ class Finding(Contract):
     tokens_out: int = Field(default=0, description="该子任务 LLM 输出 token（含修复轮）。")
     claims: list[Claim] = Field(default_factory=list)
     error: str | None = Field(default=None, description="降级/失败原因，直接进 trace 与失败归因。")
+    last_tool_error: str | None = Field(
+        default=None,
+        description="最后一次工具错误原文（截断 200 字，含 HTTP 状态与厂商 body 片段）。"
+        "没有它，无人值守跑批失败时无法区分配额/网络/key 失效——第十六轮实测教训。",
+    )
     elapsed_s: float | None = Field(default=None, description="并行调度时找长尾子任务用。")
 
     @model_validator(mode="after")

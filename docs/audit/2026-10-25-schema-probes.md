@@ -278,3 +278,27 @@ stop=tool_failure_streak**。判读：检索基础设施失效（首要假设 Ta
 查 Tavily 配额/换备用 key 或 SearXNG 后重跑，才能得到有效二次观测。
 在有效二次观测到位前，W6 报告的"单次运行"限制保持原样（不被污染的
 观测覆盖）。
+
+### 第十六轮补充（外部审计直连探针实锤 + 两处判读修正 + 缺口修复）
+
+1. **配额从假设升级为事实**：直连探针 POST /search → HTTP 432
+   {"detail":{"error":"exceeds your plan's set usage limit"}}；GET /usage →
+   1001/1000。PLAN 风险表第一条完全应验。
+2. **判读修正①**：不是"检索层整批失效"，是**配额在跑批中途耗尽**——
+   trace 里同批 sub 有的 fetches=11/13/17、有的为 0。混合环境比均匀降级
+   更不可用：连"降级"这个自变量都不干净。
+3. **判读修正②（缺失数据偏差第三形态：跨指标）**：同一批失败题，
+   coverage 记 0 进分母（n=10 → 0.51/0.42），faithfulness 因无引用记
+   None 被排除（n=7 → 0.686/0.644）——忠实度表面"升高"实为分母再度
+   缩小。(n=k) 机制因此是必要的，但读者仍须意识到 n=7 的 0.686 与
+   n=10 的 0.629 不是同一个数。
+4. **缺口已修（tool error 落盘）**：83 条 failed finding 的 error 全是
+   "stop=tool_failure_streak" 谜语，无 HTTP 状态无厂商原文——本次靠手动
+   探针才拿到实锤，50 题无人值守跑批会全程失明。修复：LoopResult
+   增 tool_errors 收集（上限 20）→ researcher 跨修复轮取最后一条 →
+   `Finding.last_tool_error`（截断 200 字）→ SQLite（老库 ALTER 迁移）
+   → trace sub_done 同字段；Tavily 错误消息带响应 body 片段
+   （raise_for_status 只有状态行，判别信息在 body 里）。
+   测试：loop 收集 / 432 body 进消息 / researcher→Finding 贯通 / DB 往返。
+
+重跑纪律：配额 11-01 重置后先跑，不重跑前的 W6 主表数字维持首轮。

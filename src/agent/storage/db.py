@@ -91,6 +91,7 @@ class Database:
         for stmt in (
             "ALTER TABLE findings ADD COLUMN tokens_in INTEGER NOT NULL DEFAULT 0",
             "ALTER TABLE findings ADD COLUMN tokens_out INTEGER NOT NULL DEFAULT 0",
+            "ALTER TABLE findings ADD COLUMN last_tool_error TEXT",
         ):
             try:
                 self._conn.execute(stmt)
@@ -128,8 +129,8 @@ class Database:
             self._conn.execute(
                 "INSERT OR REPLACE INTO findings "
                 "(run_id, sub_query_id, question, status, search_queries, pages_fetched, "
-                "tokens_in, tokens_out, claims, error, elapsed_s) "
-                "VALUES (?,?,?,?,?,?,?,?,?,?,?)",
+                "tokens_in, tokens_out, claims, error, last_tool_error, elapsed_s) "
+                "VALUES (?,?,?,?,?,?,?,?,?,?,?,?)",
                 (
                     run_id, finding.sub_query_id, finding.question,
                     finding.status.value,
@@ -138,7 +139,7 @@ class Database:
                     finding.tokens_in, finding.tokens_out,
                     json.dumps([c.model_dump(mode="json") for c in finding.claims],
                                ensure_ascii=False),
-                    finding.error, finding.elapsed_s,
+                    finding.error, finding.last_tool_error, finding.elapsed_s,
                 ),
             )
             self._conn.commit()
@@ -223,7 +224,8 @@ class Database:
                 pages_fetched=r["pages_fetched"],
                 tokens_in=r["tokens_in"], tokens_out=r["tokens_out"],
                 claims=[Claim.model_validate(c) for c in json.loads(r["claims"])],
-                error=r["error"], elapsed_s=r["elapsed_s"],
+                error=r["error"], last_tool_error=r["last_tool_error"],
+                elapsed_s=r["elapsed_s"],
             ))
         return findings
 

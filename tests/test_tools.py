@@ -110,3 +110,19 @@ class TestTavilySearch:
 
         out = run(body())
         assert out.is_error and "TOOL_ERROR" in out.content
+
+    def test_error_body_snippet_in_tool_message(self):
+        """第十六轮：Tavily 配额耗尽的判别信息在响应 body 里（HTTP 432 +
+        detail.error）——raise_for_status 只有状态行，必须带 body 片段。"""
+
+        def handler(request: httpx.Request) -> httpx.Response:
+            return httpx.Response(
+                432, json={"detail": {"error": "This request exceeds your plan's set usage limit."}})
+
+        registry = ToolRegistry()
+        registry.register(build_search_tool("k", client=httpx.AsyncClient(
+            transport=httpx.MockTransport(handler))))
+        out = run(registry.dispatch("web_search", '{"query": "x"}'))
+        assert out.is_error
+        assert "432" in out.content
+        assert "exceeds your plan" in out.content  # 厂商原文进错误消息
