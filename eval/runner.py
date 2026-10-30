@@ -63,6 +63,12 @@ A0_PROMPT = """你是研究助手（单 Agent 基线模式）。自行决定是�
 3. 只输出 JSON 对象：{"claims": [{"text": "...", "quote": "...", "snippet_id": "..."}], "sections": [{"heading": "...", "body": "..."}]}
 检索不到的信息明说"未检索到"，不要编造。"""
 
+# A0 的格式修复轮：单 agent 跑完 10 轮 tool 后偶尔不按契约收尾（final answer 不是 JSON）。
+# 不给检索机会、只要求把已有答案按契约输出——否则"格式能力"会被记成"研究能力"。
+A0_JSON_RETRY = """你的上一条回答不是合法 JSON。不要重新检索，只把上面的最终答案按契约输出：
+{"claims": [{"text": "...", "quote": "...", "snippet_id": "..."}], "sections": [{"heading": "...", "body": "..."}]}
+除这一个 JSON 对象外，不要输出任何其它文字。"""
+
 # 估算价目（CNY / M tokens，(input, output)）：deepseek-flash 2026-10 牌价估算，
 # 以厂商账单为准核对后调整；未登记的模型成本记 0（token 数始终如实）
 PRICE_CNY_PER_MTOK: dict[str, tuple[float, float]] = {
@@ -172,8 +178,25 @@ async def run_a0(
 
         obj: dict | None = None
         raws, failures = [], []
+        answer = lr.answer or ""
         try:
-            obj = extract_json_object(lr.answer or "")
+            obj = extract_json_object(answer)
+        except ValueError:
+            # 一次"只补格式"的重试（不重新检索）。没有这一步，A0 会因为收尾格式
+            # 失败被记成"0 论断"，把格式能力算进研究能力（W6 审计发现）。
+            trace.event("a0_json_retry")
+            repair = await make_llm().complete(
+                [*lr.messages, {"role": "user", "content": A0_JSON_RETRY}])
+            answer = repair.content or ""
+            result.tokens_in = sum(t.usage_in for t in traps)
+            result.tokens_out = sum(t.usage_out for t in traps)
+            try:
+                retry_ok = bool(extract_json_object(answer))
+            except ValueError:
+                retry_ok = False
+            trace.event("a0_json_retry_done", ok=retry_ok)
+        try:
+            obj = extract_json_object(answer)
             raws, parse_failures = parse_raw_claims(
                 json.dumps(obj.get("claims", []), ensure_ascii=False))
             failures = parse_failures
