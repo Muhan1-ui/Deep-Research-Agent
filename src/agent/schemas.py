@@ -453,8 +453,18 @@ class FunnelMetrics(Contract):
         return self._ratio(self.retrieval_hits, self.retrieval_total)
 
     @property
-    def verifier_pass_rate(self) -> float:
-        return self._ratio(self.claims_supported + self.claims_partial, self.claims_extracted)
+    def verifier_pass_rate(self) -> float | None:
+        """通过率只在"真正核验过"的 claim 上算。
+
+        分母 = supported + partial + unsupported（核验条数），**不含未核验**——
+        未核验是数据缺口，放进分母等于把缺口算成失败（第七轮 P1 的反面）。
+        没有任何核验记录时（A0/A1 无核验阶段）返回 None，报告显示 n/a，
+        而不是 0%——0% 会被读成"全部没通过核验"。
+        """
+        verified = self.claims_supported + self.claims_partial + self.claims_unsupported
+        if verified == 0:
+            return None
+        return round((self.claims_supported + self.claims_partial) / verified, 4)
 
     @property
     def writer_citation_rate(self) -> float:
@@ -462,10 +472,14 @@ class FunnelMetrics(Contract):
 
     def describe(self) -> str:
         pending = f"｜未核验 {self.claims_unverified}" if self.claims_unverified else ""
+        rate = self.verifier_pass_rate
+        step3 = (
+            "通过 n/a（无核验阶段）" if rate is None
+            else f"通过 {self.claims_supported + self.claims_partial} ({rate:.0%})"
+        )
         return (
             f"检索 {self.retrieval_hits}/{self.retrieval_total} ({self.retrieval_hit_rate:.0%}) → "
-            f"抽取 {self.claims_extracted} → 通过 {self.claims_supported + self.claims_partial} "
-            f"({self.verifier_pass_rate:.0%}){pending} → 引用 {self.claims_cited}/{self.claims_citable} "
+            f"抽取 {self.claims_extracted} → {step3}{pending} → 引用 {self.claims_cited}/{self.claims_citable} "
             f"({self.writer_citation_rate:.0%})"
         )
 
@@ -599,6 +613,10 @@ class EvalRecord(Contract):
         """
         claims = [c for f in self.findings for c in f.claims]
         counts = count_labels(self.verifications)
+        # 没有核验记录的 claim（A0/A1 无核验阶段）也进"未核验"桶：
+        # 否则 supported+partial+unsupported+unverified ≠ 抽取数，漏斗自相矛盾。
+        verified_ids = {v.claim_id for v in self.verifications}
+        missing = sum(1 for c in claims if c.claim_id not in verified_ids)
         citable_ids = {
             c.claim_id for c in claims if self._label_of(c.claim_id).citable
         }
@@ -609,7 +627,7 @@ class EvalRecord(Contract):
             claims_extracted=len(claims),
             claims_supported=counts["supported"],
             claims_partial=counts["partial"],
-            claims_unverified=counts["unverified"],
+            claims_unverified=counts["unverified"] + missing,
             claims_unsupported=counts["unsupported"],
             claims_citable=len(citable_ids),
             claims_cited=len(cited & citable_ids),

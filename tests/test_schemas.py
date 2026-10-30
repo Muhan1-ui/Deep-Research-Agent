@@ -15,6 +15,7 @@ from src.agent.schemas import (
     EvalQuestion,
     EvalRecord,
     Finding,
+    FunnelMetrics,
     KeyPointHit,
     ReportArtifact,
     ReportSection,
@@ -190,6 +191,18 @@ class TestMetricMath:
         assert f.claims_citable == 2                                     # c3 unsupported 不可引用
         assert f.claims_cited == 2
         assert f.writer_citation_rate == 1.0                             # ④ 2/2
+
+    def test_pass_rate_without_verifier_is_na(self):
+        """A0/A1 无核验阶段：通过率 n/a（0% 会被读成"全部没通过核验"）。"""
+        f = FunnelMetrics(retrieval_hits=0, retrieval_total=5, claims_extracted=43)
+        assert f.verifier_pass_rate is None
+        assert "n/a" in f.describe()
+
+    def test_pass_rate_excludes_unverified_from_denominator(self):
+        """未核验不进通过率分母（否则数据缺口被算成失败）。"""
+        f = FunnelMetrics(retrieval_hits=0, retrieval_total=1, claims_extracted=10,
+                          claims_supported=6, claims_partial=2, claims_unverified=2)
+        assert f.verifier_pass_rate == 1.0  # 8/8，那 2 条未核验不算失败
 
     def test_no_report_means_none_not_zero(self):
         # 无引用/无要点时指标是 None（数据缺口），不是 0（坏成绩）——两种语义必须区分
@@ -389,8 +402,8 @@ class TestUnverifiedBucket:
 
     def test_pass_rate_denominator_excludes_unverified(self):
         f = self.build().funnel()
-        # (supported + partial) / extracted = 2/3，而不是把未核验也算进来的 3/3
-        assert f.verifier_pass_rate == pytest.approx(2 / 3, abs=1e-4)
+        # (supported + partial) / 核验条数 = 2/2；未核验既不进分子也不进分母
+        assert f.verifier_pass_rate == pytest.approx(1.0, abs=1e-4)
 
     def test_buckets_are_mutually_exclusive_and_total(self):
         f = self.build().funnel()

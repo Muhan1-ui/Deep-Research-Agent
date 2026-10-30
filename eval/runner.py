@@ -9,7 +9,7 @@
 - 忠实度 × 覆盖率 × F1 成对输出（防"少写刷忠实度"）；
 - 未核验单独成桶，不进通过率（count_labels 单一实现）；
 - 覆盖证据 ⊆ citation_map（W5 定死，关闭第二轮审计开放项 ②）；
-- verifier_pass_rate 仅对 A2 有意义（A0/A1 无核验阶段，漏斗里如实为 0）。
+- verifier_pass_rate 仅对 A2 有意义（A0/A1 无核验阶段，返回 None → 报告显示 n/a）。
 - cost_cny 为估算（价目表见 PRICE_CNY_PER_MTOK），以厂商账单为准。
 """
 
@@ -337,11 +337,13 @@ def render_report(
     unpriced = sorted(m for m in priced_models if m and m not in PRICE_CNY_PER_MTOK)
     mixes = sorted({f"{r.judge_model}#{r.judge_effort or '?'}" for r in records})
     mixed_judges = len({(r.judge_model, r.judge_effort) for r in records}) > 1
+    codes = sorted({r.code_version for r in records}) or [code_version]
+    code_disp = "、".join("`" + c + "`" for c in codes)
     lines = [
         f"# 评测报告 {ts}", "",
         f"- 数据集：`{dataset_path}`（v{dataset_version}，n={n_questions}）"
         f"　配置：{','.join(sorted({str(r.config.value) for r in records}))}"
-        f"　code：`{code_version}`　producer prompt：{PRODUCER_PROMPT_VERSION}",
+        f"　code：{code_disp}　producer prompt：{PRODUCER_PROMPT_VERSION}",
         f"- judge：{settings.judge_model or 'unknown'}"
         f"（{vendor_of(settings.judge_base_url or settings.llm_base_url)}）"
         f"　judge 档位：{','.join(sorted({r.judge_effort or '未记录' for r in records}))}"
@@ -376,7 +378,7 @@ def render_report(
         "",
         "注：有报告率=产出报告的题占比；全绿率=无任何子任务降级/失败的题占比"
         "（degraded 题有报告、有指标，计入有报告率但不计全绿——W6 全表按此口径读）。"
-        "均值只在'有值'样本上计算。通过率/未核验仅对 A2 有意义。"
+        "均值只在'有值'样本上计算。通过率仅对有核验阶段的配置有意义（A0/A1 显示 n/a）；未核验另计。"
         "成本为估算价（researcher/strong/judge 分档），"
         + (f"未登记价目：{','.join(unpriced)}（计 0 不代表免费）。" if unpriced else "")
         + "judge token 在逐题明细单列。"
@@ -494,11 +496,17 @@ def latest_per_question(records: list[EvalRecord]) -> list[EvalRecord]:
 
 
 def render_from_db(settings: Settings, dataset_path: str = "(from-db)",
-                   latest_only: bool = False) -> str:
-    """从 eval_records 表重渲染汇总——跑批中断/补题后不必重跑。"""
+                   latest_only: bool = False, dataset_version: str | None = None) -> str:
+    """从 eval_records 表重渲染汇总——跑批中断/补题后不必重跑。
+
+    dataset_version：只取该数据集版本的记录。不筛会把 sample.yaml 与 W6 的
+    记录混进同一张表（题号不同、n 变大、judge 配置也跟着混）。
+    """
     db = Database(settings.database_path)
     recs = db.load_eval_records()
     db.close()
+    if dataset_version:
+        recs = [r for r in recs if r.dataset_version == dataset_version]
     if latest_only:
         recs = latest_per_question(recs)
     if not recs:
@@ -523,10 +531,16 @@ def main() -> None:
                         help="不跑批：从 eval_records 表重渲染汇总报告")
     parser.add_argument("--latest-only", action="store_true",
                         help="配合 --report-only：同 (config, 题) 只保留最后一次运行")
+    parser.add_argument("--dataset-version", default=None,
+                        help="配合 --report-only：只渲染该数据集版本的记录（默认取 --dataset 的版本）")
     args = parser.parse_args()
     settings = Settings()
     if args.report_only:
-        md = render_from_db(settings, args.dataset, latest_only=args.latest_only)
+        dsv = args.dataset_version
+        if not dsv and Path(args.dataset).exists():
+            _, dsv = load_dataset(args.dataset)
+        md = render_from_db(settings, args.dataset, latest_only=args.latest_only,
+                            dataset_version=dsv)
     else:
         md, records = asyncio.run(run_batch(
             args.dataset, args.configs, settings,
