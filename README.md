@@ -16,6 +16,8 @@ LLM_API_KEY= TAVILY_API_KEY= .venv/Scripts/python.exe -m src.agent research "MCP
 预期：打印报告路径，报告含 ≥3 条 `[n]` 引用，全程不联网、不需要任何 key。
 mock 走的是与真实链路**同一套校验**（引用完整性、句级锚定、verifier 判定），只把 LLM 与检索换成固定实现。
 
+> 注意：mock 的检索返回**单一固定来源**，因此 9 条引用会全部指向同一个 URL。这一模式验证的是"链路与校验能跑通"（引用完整性、句级锚定、verifier 判定），**不验证检索质量与来源多样性**——后者需要真实 API key 与联网。
+
 ## 开发
 
 ```bash
