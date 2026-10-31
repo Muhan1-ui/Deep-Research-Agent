@@ -14,3 +14,6 @@ data/
 # 评测产出（汇总报告随时可重渲染，不进 git）
 eval/reports/
 .idea/
+
+# 私人笔记（口述稿）不入库
+docs/interview-script.md
