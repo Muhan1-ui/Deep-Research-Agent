@@ -8,15 +8,37 @@
 
 ## 快速验证（不需要 key，无需联网）
 
-```bash
-python -m venv .venv && .venv/Scripts/pip install -e . pytest
-LLM_API_KEY= TAVILY_API_KEY= .venv/Scripts/python.exe -m src.agent research "MCP 协议的核心架构" --config A2 --mock
+**Windows PowerShell**（PyCharm 默认终端）：
+
+```powershell
+cd D:\deep-research-agent
+.venv\Scripts\python.exe -m src.agent research "MCP 协议的核心架构" --config A2 --mock
 ```
 
-预期：打印报告路径，报告含 ≥3 条 `[n]` 引用，全程不联网、不需要任何 key。
-mock 走的是与真实链路**同一套校验**（引用完整性、句级锚定、verifier 判定），只把 LLM 与检索换成固定实现。
+**Git Bash / macOS / Linux**：
 
-> 注意：mock 的检索返回**单一固定来源**，因此 9 条引用会全部指向同一个 URL。这一模式验证的是"链路与校验能跑通"（引用完整性、句级锚定、verifier 判定），**不验证检索质量与来源多样性**——后者需要真实 API key 与联网。
+```bash
+cd /d/deep-research-agent
+.venv/Scripts/python.exe -m src.agent research "MCP 协议的核心架构" --config A2 --mock
+```
+
+预期：打印 3 个子问题 → `claims=9 cited=9` → 报告正文 9 句互不相同、来源按 3 个 URL 分组。
+
+想让命令"证明"不依赖任何 key，可先清空环境变量——注意两种终端语法不同：
+
+```powershell
+$env:LLM_API_KEY=""; $env:TAVILY_API_KEY=""     # PowerShell：赋值空字符串
+```
+```bash
+export LLM_API_KEY= TAVILY_API_KEY=             # bash
+```
+
+常见坑：
+- PowerShell 不支持 `VAR=值 命令` 的 bash 前缀写法，会报"无法将 ... 识别为 cmdlet"；
+- `&&` 在 PowerShell 5.1 不合法（7.0+ 才支持），用 `;` 或分两行；
+- 必须**在项目根目录**执行：`config.py` 的 `env_file=".env"` 是按当前工作目录解析的，在 `app/` 下启动会读不到 `.env`，表现为"明明填了 key 却提示缺失"。
+
+mock 走的是与真实链路**同一套校验**（引用完整性、句级锚定、verifier 判定），只把 LLM 与检索换成固定实现；mock 的三段固定资料分别对应架构 / 通信 / 安全，因此 9 条引用分属 3 个 URL——这一模式验证"链路与校验能跑通"，**不验证检索质量与来源多样性**。
 
 ## 开发
 
