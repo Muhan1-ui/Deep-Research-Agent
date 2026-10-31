@@ -330,6 +330,13 @@ class ReportArtifact(Contract):
         description="writer 明确拒绝写入的内容及原因（如证据不足）。"
         "这是覆盖率下降的正当理由，也是'partial 保留'策略的旁证。",
     )
+    deduped: int = Field(
+        default=0,
+        ge=0,
+        description="被归并掉的重复论断条数（(quote, url) 完全相同）。"
+        "多个子问题命中同一份证据时只保留首次出现的一条；写进 write_done "
+        "trace，便于区分'证据本来就少'与'重复证据被合并'。",
+    )
 
     @property
     def word_count(self) -> int:

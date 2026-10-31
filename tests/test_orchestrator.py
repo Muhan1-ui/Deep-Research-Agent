@@ -221,7 +221,15 @@ def mocked_a2_factory(url: str):
     def _tc(cid, name, args):
         return ToolCallRequest(id=cid, name=name, arguments_raw=args)
 
-    def researcher_llm():
+    # 三个子问题命中同一 URL，但各读不同段落：证据互不相同。writer 只归并
+    # 完全相同的 (quote, url)，若三条假 claim 抄同一段，会被正确合并成一条，
+    # 测试就不再覆盖"三条独立证据全部被引用"这一意图。
+    fetch_queries = ("open standard Anthropic foundation",
+                     "pasta tomato sauce", "gardening roses sunlight")
+
+    def researcher_llm(index: int):
+        fetch_query = fetch_queries[index]
+
         def dynamic_claims(messages):
             tool_msg = [m for m in messages if m["role"] == "tool"][-1]["content"]
             sid = _re.search(r"id=([^\]]+)\]", tool_msg).group(1)
@@ -233,7 +241,7 @@ def mocked_a2_factory(url: str):
             LLMResult(content=None, tool_calls=[_tc("t1", "web_search", '{"query": "MCP"}')],
                       usage_in=100, usage_out=5, model="mock-flash-1017"),
             LLMResult(content=None, tool_calls=[
-                _tc("t2", "fetch_page", json.dumps({"url": url, "query": "MCP"}))],
+                _tc("t2", "fetch_page", json.dumps({"url": url, "query": fetch_query}))],
                 usage_in=100, usage_out=5, model="mock-flash-1017"),
             dynamic_claims,
         ])
@@ -263,7 +271,7 @@ def mocked_a2_factory(url: str):
         if counter["n"] == 1:
             return SmartFakeLLM([LLMResult(content=PLAN_3, usage_in=10, usage_out=2, model="mock-flash-1017")])
         if counter["n"] <= 4:
-            return researcher_llm()
+            return researcher_llm(counter["n"] - 2)
         if counter["n"] == 5:
             return verifier_llm()
         return writer_llm()

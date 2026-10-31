@@ -237,7 +237,8 @@ async def run_research(
         await db.save_report(run_id, report)
         result.report = report
         trace.event("write_done", cited=len(report.citation_map),
-                    refusals=len(report.refusals), verified=len(result.verifications))
+                    refusals=len(report.refusals), verified=len(result.verifications),
+                    deduped=report.deduped)
         if not report.citation_map and status is RunStatus.OK:
             status = RunStatus.DEGRADED  # 有论断但报告零引用：降级如实
 

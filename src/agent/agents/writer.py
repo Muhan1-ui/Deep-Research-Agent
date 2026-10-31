@@ -9,7 +9,10 @@ citation_map 程序化生成（第二轮审计 ⑧ 的约束落地）：
 - 代码把用到的编号重排成 1..K 连续，正文 token 由代码替换（[[旧]] → [新]，
   无效 token 剥除）；报告末尾追加按 URL 分组的来源清单（第六轮 P1-A）；
 - 不解析普通 [n]（会误伤代码块与链接，如 choices[0]）——[[n]] 是我们自己
-  定义的协议 token，与自然文本无碰撞。
+  定义的协议 token，与自然文本无碰撞；
+- 编号前按 (quote, url) 归并完全相同的论断：同一份证据被多个子问题命中时
+  只保留一条（首次出现），不生成指向同一引文的冗余编号；归并条数写入
+  ReportArtifact.deduped，随 write_done trace 落盘。
 """
 
 from __future__ import annotations
@@ -63,12 +66,31 @@ def _looks_like_bare_citations(output: dict) -> bool:
     return bool(BARE_CITE_RE.search(joined)) and "[[" not in joined
 
 
+def dedupe_claims(citable: list[Claim]) -> tuple[list[Claim], int]:
+    """按 (quote, url) 归并完全相同的论断，保留首次出现（claim_id 最小）。
+
+    只合并**完全相同**的证据对：同一 URL 但 quote 不同是不同的事实，不能合并
+    （否则会丢信息）。归并发生在编号之前，所以重复论断根本拿不到编号，
+    正文与来源清单里都不会出现指向同一 quote 的冗余 [n]。
+    """
+    seen: set[tuple[str, str]] = set()
+    kept: list[Claim] = []
+    for c in citable:
+        key = (c.quote, c.url)
+        if key in seen:
+            continue
+        seen.add(key)
+        kept.append(c)
+    return kept, len(citable) - len(kept)
+
+
 def assemble_citable(
     findings: list[Finding], verifications: list[Verification],
-) -> tuple[list[tuple[int, Claim]], list[Claim]]:
+) -> tuple[list[tuple[int, Claim]], list[Claim], int]:
     """可引用论断（非 unsupported）全局按 claim_id 排序后编号 1..k；
-    返回 (编号表, 被拒论断列表)。编号分配完全由代码决定，与 finding
-    顺序无关——同一批 claims 在任何编排顺序下编号一致（可复现）。"""
+    返回 (编号表, 被拒论断列表, 被归并掉的重复条数)。编号分配完全由代码
+    决定，与 finding 顺序无关——同一批 claims 在任何编排顺序下编号一致
+    （可复现）。重复 (quote, url) 在编号前归并，首次出现的 claim_id 保留。"""
     label_by = {v.claim_id: v.label for v in verifications}
     citable: list[Claim] = []
     refused: list[Claim] = []
@@ -76,7 +98,8 @@ def assemble_citable(
         for c in f.claims:
             (citable if label_by.get(c.claim_id) is not SupportLabel.UNSUPPORTED else refused).append(c)
     citable.sort(key=lambda c: c.claim_id)
-    return [(i, c) for i, c in enumerate(citable, 1)], refused
+    citable, deduped = dedupe_claims(citable)
+    return [(i, c) for i, c in enumerate(citable, 1)], refused, deduped
 
 
 def build_writer_input(question: str, numbered: list[tuple[int, Claim]],
@@ -100,6 +123,7 @@ def build_report(
     numbered: list[tuple[int, Claim]],
     refused: list[Claim],
     writer_output: dict,
+    deduped: int = 0,
 ) -> ReportArtifact:
     """从 writer 的结构化输出构造 ReportArtifact。编号绑定由代码完成。
 
@@ -152,7 +176,7 @@ def build_report(
 
     return ReportArtifact(
         markdown="\n\n".join(parts), sections=sections,
-        citation_map=citation_map, refusals=refusals,
+        citation_map=citation_map, refusals=refusals, deduped=deduped,
     )
 
 
@@ -160,12 +184,13 @@ async def write_report(
     llm, question: str, findings: list[Finding], verifications: list[Verification],
     max_retries: int = 1,
 ) -> ReportArtifact:
-    numbered, refused = assemble_citable(findings, verifications)
+    numbered, refused, deduped = assemble_citable(findings, verifications)
     if not numbered:
         # 无可引用论断：产出诚实的空报告而非崩溃（run 状态由 findings 决定）
         return ReportArtifact(
             markdown=f"# {question}\n\n未检索到可支撑回答的论断。",
             citation_map={}, refusals=[f"无可引用论断：{c.claim_id}" for c in refused],
+            deduped=deduped,
         )
     user_msg = build_writer_input(question, numbered, verifications)
     messages: list[dict] = [
@@ -192,7 +217,7 @@ async def write_report(
         messages.append({"role": "user", "content": _RETRY_HINT})
     if output is None and bare_fallback is not None:
         # 重试用尽仍不合规：正文仍可读，但不能伪称有可校验引用
-        report = build_report(question, numbered, refused, bare_fallback)
+        report = build_report(question, numbered, refused, bare_fallback, deduped=deduped)
         report.refusals.append(
             "引用格式不合规：模型使用单方括号 [n] 而非 [[n]]，本次报告无可校验引用"
         )
@@ -203,4 +228,4 @@ async def write_report(
             citation_map={},
             refusals=[f"writer 输出解析失败；可引用论断 {len(numbered)} 条被弃"],
         )
-    return build_report(question, numbered, refused, output)
+    return build_report(question, numbered, refused, output, deduped=deduped)

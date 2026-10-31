@@ -6,6 +6,7 @@
 
 import asyncio
 import json
+import re
 from datetime import date
 
 from src.agent.agents.writer import (
@@ -31,9 +32,11 @@ def run(coro):
 
 
 def mk_claim(cid: str, text: str = "论断") -> Claim:
+    # quote/url 用完整 cid：不同 claim 必须是不同证据，(quote, url) 归并
+    # 只应命中真正的重复（否则测试假件自己制造出"完全相同的论断"）
     return Claim(
-        claim_id=cid, sub_query_id=cid.split(":")[1], text=f"{text}{cid[-3:]}",
-        quote=f"引文{cid[-3:]}", url=f"https://e.com/{cid[-3:]}",
+        claim_id=cid, sub_query_id=cid.split(":")[1], text=f"{text}{cid}",
+        quote=f"引文{cid}", url=f"https://e.com/{cid}",
         as_of_date=date(2026, 11, 2), extracted_by="m",
     )
 
@@ -56,10 +59,11 @@ class TestAssemble:
             ("r:SQ2:001", "supported"), ("r:SQ2:002", "unsupported"),
             ("r:SQ1:001", "partial"),
         ])
-        numbered, refused = assemble_citable(findings, verdicts)
+        numbered, refused, deduped = assemble_citable(findings, verdicts)
         assert [n for n, _ in numbered] == [1, 2]
         assert [c.claim_id for _, c in numbered] == ["r:SQ1:001", "r:SQ2:001"]
         assert [c.claim_id for c in refused] == ["r:SQ2:002"]
+        assert deduped == 0  # 三条引文互不相同，不该归并
 
     def test_writer_input_carries_tokens_and_verdicts(self):
         numbered = [(1, mk_claim("r:SQ1:001"))]
@@ -76,6 +80,56 @@ class TestAssemble:
         line1, line2 = text.strip().splitlines()[-2:]
         assert "partial" in line1 and "未核验" in line2
         assert "partial" not in line2  # 未核验行不得再出现 partial 字样
+
+
+def mk_claim_at(cid: str, text: str, quote: str, url: str) -> Claim:
+    return Claim(
+        claim_id=cid, sub_query_id=cid.split(":")[1], text=text, quote=quote,
+        url=url, as_of_date=date(2026, 11, 2), extracted_by="m",
+    )
+
+
+class TestDedupe:
+    """同一份证据被多个子问题命中：编号前按 (quote, url) 归并。"""
+
+    def test_identical_quote_url_merged_but_same_url_diff_quote_kept(self):
+        shared_quote = "MCP 采用客户端-服务器架构。"
+        shared_url = "https://e.com/shared"
+        c1 = mk_claim_at("r:SQ1:001", "论断一", shared_quote, shared_url)
+        c2 = mk_claim_at("r:SQ1:002", "论断二", shared_quote, shared_url)  # 完全重复
+        c3 = mk_claim_at("r:SQ2:001", "论断三", "MCP 使用 JSON-RPC 2.0。", shared_url)
+        findings = [
+            Finding(sub_query_id="SQ1", question="q1", status=RunStatus.OK,
+                    claims=[c1, c2]),
+            Finding(sub_query_id="SQ2", question="q2", status=RunStatus.OK,
+                    claims=[c3]),
+        ]
+        verdicts = mk_verdicts([
+            ("r:SQ1:001", "supported"), ("r:SQ1:002", "supported"),
+            ("r:SQ2:001", "supported"),
+        ])
+        numbered, refused, deduped = assemble_citable(findings, verdicts)
+
+        assert deduped == 1                                   # 合并掉一条
+        # 保留首次出现（claim_id 最小），重复项不分配新编号
+        assert [c.claim_id for _, c in numbered] == ["r:SQ1:001", "r:SQ2:001"]
+
+        # 像 writer 一样按输入表逐条写正文：重复项根本不在输入表里
+        body = "\n".join(f"{c.text}[[{n}]]" for n, c in numbered)
+        report = build_report("问题", numbered, refused,
+                              {"sections": [{"heading": "结论", "body": body}]},
+                              deduped=deduped)
+        sec = next(s for s in report.sections if s.heading == "结论")
+        lines = [ln for ln in sec.body.splitlines() if ln.strip()]
+
+        assert len(lines) == 2                                # 正文只剩 2 条
+        assert not any("论断二" in ln for ln in lines)        # 完全重复的被归并
+        assert any("论断三" in ln for ln in lines)            # 同 URL 不同 quote 保留
+        nums = [int(n) for n in re.findall(r"\[(\d+)\]", sec.body)]
+        assert nums == [1, 2]                                 # 编号连续
+        assert set(nums) == set(report.citation_map)          # 正文与 map 一一对应
+        assert report.citation_map == {1: "r:SQ1:001", 2: "r:SQ2:001"}
+        assert report.deduped == 1
 
 
 class TestBuildReport:

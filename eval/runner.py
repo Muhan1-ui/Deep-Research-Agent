@@ -220,13 +220,13 @@ async def run_a0(
         result.findings, result.total_claims = [finding], len(built.claims)
 
         if built.claims and obj is not None:
-            numbered, _ = assemble_citable([finding], [])  # 无核验：全部可引用
-            report = build_report(question, numbered, [], obj)
+            numbered, _, deduped = assemble_citable([finding], [])  # 无核验：全部可引用
+            report = build_report(question, numbered, [], obj, deduped=deduped)
             report.refusals.extend(
                 f"A0 论断未解析[{f.reason}] idx={f.index} {f.detail[:80]}" for f in failures)
             await db.save_report(run_id, report)
             result.report = report
-            trace.event("write_done", cited=len(report.citation_map))
+            trace.event("write_done", cited=len(report.citation_map), deduped=report.deduped)
         status = _aggregate_status(result.findings)
         await db.finish_run(run_id, status)
         trace.event("run_done", status=status.value, claims=result.total_claims,

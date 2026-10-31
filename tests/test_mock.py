@@ -53,11 +53,18 @@ def test_mock_a2_report_without_keys_or_network(tmp_path, monkeypatch):
         for f in result.findings for c in f.claims
     )
     # 引用完整性：正文每个 [n] 都能在 citation_map 中找到，map 的 claim_id 都真实存在
-    body = "\n".join(
-        s.body for s in result.report.sections if s.heading != "来源"
-    )
+    prose = [s for s in result.report.sections if s.heading != "来源"]
+    body = "\n".join(s.body for s in prose)
     cited = {int(n) for n in re.findall(r"\[(\d+)\]", body)}
     assert cited and cited <= {int(n) for n in result.report.citation_map}
+
+    # 三个子问题各读一份资料 → 9 条 claim 是 9 句互不相同的内容
+    assert result.total_claims == 9
+    prose_lines = [ln for s in prose for ln in s.body.splitlines() if ln.strip()]
+    assert len(prose_lines) == 9
+    assert len(prose_lines) == len(set(prose_lines))  # 按正文行去重后行数不变
+    assert len(result.report.citation_map) >= 3
+    assert result.report.deduped == 0  # 资料本就不同，没有重复可归并
     all_ids = {c.claim_id for f in result.findings for c in f.claims}
     assert set(result.report.citation_map.values()) <= all_ids
 

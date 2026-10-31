@@ -32,49 +32,87 @@ from src.agent.tools.pages import FetchPageArgs
 from src.agent.tools.search import WebSearchArgs
 
 # --------------------------------------------------------------------------- #
-# 固定外部世界：一份关于 MCP 架构的 mock 资料，共 3 段、每段 3 句
+# 固定外部世界：三个子问题各一份资料（架构 / 通信 / 安全），每份 3 句
+#
+# 每份正文互不重叠——这是刻意的：mock 端到端要能暴露"多个子问题拿到同一份
+# 资料"造成的重复，而重复由 writer 的 (quote, url) 归并兜住（单测覆盖）。
 # --------------------------------------------------------------------------- #
-MOCK_PAGE_HTML = """<html><head><title>MCP 协议核心架构（mock 资料页）</title></head>
+MOCK_TOPICS = [
+    {
+        "key": "架构",
+        "title": "MCP 协议架构详解（mock）",
+        "url": "https://example.invalid/mcp-architecture",
+        "summary": "MCP 采用客户端-服务器架构，宿主应用通过客户端与多个服务器保持一对一连接。",
+        "html": """<html><head><title>MCP 协议架构详解（mock 资料页）</title></head>
 <body><article>
 <h1>Model Context Protocol 架构概览</h1>
-<p>MCP（Model Context Protocol）是一个开放协议，用于规范大模型应用与外部数据源和工具之间的连接方式。MCP 采用客户端-服务器架构，宿主应用通过客户端与多个服务器保持一对一连接。每个服务器都可以提供三类标准能力：工具（Tools）、资源（Resources）和提示（Prompts）。</p>
-<p>通信层面，MCP 基于 JSON-RPC 2.0 协议交换消息，支持 stdio 与 Streamable HTTP 两种传输方式。客户端与服务器之间遵循生命周期约定，依次经历初始化、能力协商与消息交换三个阶段。初始化完成后，客户端可以发送请求列出服务器提供的工具清单。</p>
-<p>安全模型方面，宿主应用在将服务器数据传给大模型之前必须征得用户明确同意。MCP 规范要求服务器不得在未经授权的情况下访问宿主之外的数据。采样（Sampling）能力允许服务器在用户批准后借助客户端发起模型补全请求。</p>
-</article></body></html>"""
-
-MOCK_SEARCH_RESULTS = [
-    (
-        "MCP 协议架构详解（mock）",
-        "https://example.invalid/mcp-architecture",
-        "MCP 采用客户端-服务器架构，宿主应用通过客户端与多个服务器保持一对一连接。",
-    ),
-    (
-        "MCP 传输与生命周期（mock）",
-        "https://example.invalid/mcp-transport",
-        "MCP 基于 JSON-RPC 2.0 协议交换消息，支持 stdio 与 Streamable HTTP 两种传输方式。",
-    ),
-    (
-        "MCP 安全模型（mock）",
-        "https://example.invalid/mcp-security",
-        "宿主应用在将服务器数据传给大模型之前必须征得用户明确同意。",
-    ),
+<p>MCP 采用客户端-服务器架构，宿主应用通过客户端与多个服务器保持一对一连接。</p>
+<p>每个服务器可以向客户端暴露工具（Tools）、资源（Resources）与提示（Prompts）三类标准能力。</p>
+<p>客户端在初始化阶段与服务器完成能力协商，随后才进入正常的消息交换流程。</p>
+</article></body></html>""",
+    },
+    {
+        "key": "通信",
+        "title": "MCP 传输与生命周期（mock）",
+        "url": "https://example.invalid/mcp-transport",
+        "summary": "MCP 基于 JSON-RPC 2.0 协议交换消息，支持 stdio 与 Streamable HTTP 两种传输方式。",
+        "html": """<html><head><title>MCP 传输与生命周期（mock 资料页）</title></head>
+<body><article>
+<h1>MCP 通信机制</h1>
+<p>MCP 基于 JSON-RPC 2.0 协议交换消息，请求与响应共用同一种消息封装格式。</p>
+<p>传输层支持 stdio 与 Streamable HTTP 两种方式，本地进程通常使用标准输入输出通信。</p>
+<p>客户端与服务器遵循生命周期约定，依次经历初始化、能力协商与消息交换三个阶段。</p>
+</article></body></html>""",
+    },
+    {
+        "key": "安全",
+        "title": "MCP 安全模型（mock）",
+        "url": "https://example.invalid/mcp-security",
+        "summary": "宿主应用在将服务器数据传给大模型之前必须征得用户明确同意。",
+        "html": """<html><head><title>MCP 安全模型（mock 资料页）</title></head>
+<body><article>
+<h1>MCP 安全模型</h1>
+<p>宿主应用在把服务器数据传给大模型之前，必须征得用户的明确同意。</p>
+<p>MCP 规范要求服务器不得在未经授权的情况下访问宿主之外的数据。</p>
+<p>采样（Sampling）能力允许服务器在用户批准后，借助客户端发起模型补全请求。</p>
+</article></body></html>""",
+    },
 ]
+
+MOCK_PAGE_BY_URL = {t["url"]: t["html"] for t in MOCK_TOPICS}
+
+MOCK_SEARCH_RESULTS = [(t["title"], t["url"], t["summary"]) for t in MOCK_TOPICS]
+
+# 三个子问题的公共前缀都含"架构"，所以必须先匹配更具体的"安全""通信"。
+_TOPIC_PRIORITY = ("安全", "通信", "架构")
 
 
 def _serve_fixture(request: httpx.Request) -> httpx.Response:
-    """MockTransport handler：任何 URL 都返回同一份固定资料（不解析域名）。"""
-    return httpx.Response(200, html=MOCK_PAGE_HTML)
+    """MockTransport handler：按 URL 返回对应子问题的固定资料。"""
+    url = str(request.url)
+    html = MOCK_PAGE_BY_URL.get(url)
+    if html is None:
+        # 不静默兜底成同一份资料：未知 URL 必须显形，否则 mock 又会退化成
+        # "任何来源都长一个样"，把检索层的错误藏起来。
+        return httpx.Response(404, text=f"mock 资料不存在: {url}")
+    return httpx.Response(200, html=html)
 
 
 class MockSearch:
-    """web_search 的假实现：输出格式与 TavilySearch 完全一致。"""
+    """web_search 的假实现：输出格式与 TavilySearch 完全一致。
+
+    按子问题关键词把对应资料排到第一条——researcher 只深读首条结果，
+    这样架构/通信/安全三个子问题各读各的页面，9 条 claim 互不相同。
+    """
 
     async def __call__(self, args: WebSearchArgs) -> str:
+        chosen = next((k for k in _TOPIC_PRIORITY if k in args.query), None)
+        results = list(MOCK_TOPICS)
+        if chosen is not None:
+            results.sort(key=lambda t: t["key"] != chosen)  # 稳定排序：命中项在前
         lines = [f"搜索结果 for {args.query!r}:"]
-        for i, (title, url, summary) in enumerate(
-            MOCK_SEARCH_RESULTS[: args.max_results], 1
-        ):
-            lines.append(f"{i}. {title}\n   {url}\n   {summary}")
+        for i, t in enumerate(results[: args.max_results], 1):
+            lines.append(f"{i}. {t['title']}\n   {t['url']}\n   {t['summary']}")
         return "\n".join(lines)
 
 
