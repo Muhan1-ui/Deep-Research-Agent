@@ -4,7 +4,7 @@
 
 - 项目计划（6 周核心 + buffer、架构、评测与消融方案）：[PLAN.md](./PLAN.md)
 - 数据契约与指标口径：`src/agent/schemas.py`（W0 定稿，口径定义写在文件头注释）
-- 状态：**W1 ✅ 原生 tool-calling loop + web_search + CLI（A0 模式）**
+- 状态：**W6 ✅ 10 题 × A0/A1/A2 消融 + 跨厂商 judge + 校准证据**（结论与威胁效度见 [docs/w6-report.md](./docs/w6-report.md)；第十六轮 A1/A2 复跑受检索配额耗尽污染，判读见 [docs/audit/2026-10-25-schema-probes.md](./docs/audit/2026-10-25-schema-probes.md) §第十六轮）
 
 ## 开发
 
@@ -36,6 +36,11 @@ python app/gradio_ui.py
 注意：trace 里 token 在 `sub_done`（逐子任务 `tokens_*`）与 `run_done`（全量 `total_tokens_*`）各记一次，jq 全量求和会双计——按 event 过滤。成本实测（deepseek-flash，2026-10）：一次完整 A2 研究 ≈ 550k~570k input tokens ≈ **¥0.6（空闲）/ ¥1.3（高峰）**——已含修复轮重检索与失败子任务的开销（失败的子问题几乎和成功的一样贵，这正是 W7 缓存与模型分级要解决的）。
 
 > 抓取合规：fetch_page 为低频研究用途直连抓取，未实现 robots.txt 强制拦截；使用时请遵守目标站点的服务条款与访问频率约束。
+
+## 已知限制
+
+- **结论的跨轮稳健性未验证。** W6 那轮 A2 忠实度高于 A1（+7.6），复跑一轮方向反转（A1 高 4.2），且两侧 95% CI 重叠。经 trace 判读，复跑轮 3~5 题检索命中率为 0，属检索层退化。因此消融结论只在检索正常的那一轮成立。
+- **报告头"有报告率"与逐题明细不一致**：某轮 3 题 `run_failed`（无忠实度），表头仍显示 100%。该列口径已知失真，读数请以逐题明细为准（详见 `eval/reports/degradation-breakdown.md`）。
 
 ## 路线图
 
