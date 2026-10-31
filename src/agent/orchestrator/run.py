@@ -58,10 +58,20 @@ class _UsageTrap:
         return getattr(self._inner, name)
 
 
-def _build_tools(settings: Settings, db: Database, http_client=None):
-    """共享工具构建：run_research 与 eval.runner 的 A0 基线用同一套接线。"""
-    fetcher = PageFetcher(settings.pages_dir, client=http_client, on_page=db.save_page)
+def _build_tools(settings: Settings, db: Database, http_client=None, mock: bool = False):
+    """共享工具构建：run_research 与 eval.runner 的 A0 基线用同一套接线。
+
+    mock=True 只替换工具的**外部实现**（搜索固定结果、抓取走 MockTransport），
+    返回的 fetcher 仍是 PageFetcher 的实例，claims 解析 / 落库 / 锚定路径不变。
+    """
     registry = ToolRegistry()
+    if mock:
+        from src.agent.mock import build_mock_fetch_tool, build_mock_search_tool
+        fetcher, fetch_tool = build_mock_fetch_tool(settings.pages_dir, on_page=db.save_page)
+        registry.register(build_mock_search_tool())
+        registry.register(fetch_tool)
+        return fetcher, registry
+    fetcher = PageFetcher(settings.pages_dir, client=http_client, on_page=db.save_page)
     if settings.tavily_api_key:
         registry.register(build_search_tool(settings.tavily_api_key))
     registry.register(Tool(  # 共享同一个 fetcher：claims 解析 + 落库都靠它
@@ -126,19 +136,29 @@ async def run_research(
     max_concurrency: int = 4,
     config: str = "A1",
     http_client=None,
+    mock: bool | None = None,
 ) -> ResearchRunResult:
     if config not in ("A1", "A2"):  # A0 走 ask 命令
         raise SystemExit(f"未知配置 {config}（research 支持 A1/A2）")
     settings = settings or Settings()
-    if not settings.llm_api_key:
+    # 显式参数优先于环境变量/配置（CLI 只在给了 --mock 时传 True）
+    use_mock = settings.mock if mock is None else mock
+    if not use_mock and not settings.llm_api_key:
         raise SystemExit("缺少 LLM_API_KEY：复制 .env.example 为 .env 并填写")
-    llm_factory = llm_factory or (lambda: LLMClient(settings))
+    if llm_factory is None:
+        if use_mock:
+            from src.agent.mock import MockLLM
+            llm_factory = MockLLM
+        else:
+            llm_factory = lambda: LLMClient(settings)  # noqa: E731
+    # mock 模式下如实标注抽取/核验来源：model 名是 mock，不是真实的 llm_model
+    engine = "mock" if use_mock else settings.llm_model
     own_db = db is None
     db = db or Database(settings.database_path)
 
     run_id = new_run_id()
     trace = JsonlTrace(run_id, settings.trace_dir)
-    fetcher, registry = _build_tools(settings, db, http_client)
+    fetcher, registry = _build_tools(settings, db, http_client, mock=use_mock)
     # llm 生命周期：工厂每产一个就登记一个，finally 统一 aclose——
     # 否则批跑几百次 run，每个 worker 一个连接池，fd 会耗尽
     traps: list[_UsageTrap] = []
@@ -151,7 +171,8 @@ async def run_research(
     t0 = datetime.now().astimezone()
     result = ResearchRunResult(run_id=run_id, question=question, config=config)
     try:
-        trace.event("run_start", question=question, run_id=run_id, config=config)
+        trace.event("run_start", question=question, run_id=run_id, config=config,
+                    mock=use_mock)
         await db.save_run(run_id, question, config=config)  # 初始 'running'，见 db.py
 
         plan = await make_plan(make_llm("planner"), question)
@@ -167,7 +188,7 @@ async def run_research(
                 try:
                     finding = await research_sub_query(
                         make_llm("researcher"), registry, run_id, sub,
-                        resolver=fetcher, extracted_by=settings.llm_model,
+                        resolver=fetcher, extracted_by=engine,
                     )
                 except Exception as e:  # noqa: BLE001 —— 单子任务崩溃只标记该 Finding，不拖垮 run
                     finding = Finding(
@@ -197,7 +218,7 @@ async def run_research(
         if config == "A2" and all_claims:
             verifier_llm = make_llm("verifier")
             result.verifications = await verify_claims(
-                verifier_llm, all_claims, checked_by=settings.llm_model)
+                verifier_llm, all_claims, checked_by=engine)
             contra = await detect_contradictions(
                 verifier_llm, result.verifications, {c.claim_id: c for c in all_claims})
             for v in result.verifications:

@@ -28,18 +28,29 @@ ASK_PROMPT = """你是一个严谨的研究助手，当前运行在单 Agent 模
 
 def build_registry(settings: Settings) -> ToolRegistry:
     registry = ToolRegistry()
+    if settings.mock:
+        from src.agent.mock import build_mock_fetch_tool, build_mock_search_tool
+        _, fetch_tool = build_mock_fetch_tool(settings.pages_dir)
+        registry.register(build_mock_search_tool())
+        registry.register(fetch_tool)
+        return registry
     if settings.tavily_api_key:
         registry.register(build_search_tool(settings.tavily_api_key))
     registry.register(build_fetch_tool(settings.pages_dir))  # fetch_page 无需任何 key
     return registry
 
 
-async def run_ask(question: str, max_turns: int) -> int:
-    settings = Settings()
-    if not settings.llm_api_key:
+async def run_ask(question: str, max_turns: int, mock: bool | None = None) -> int:
+    settings = Settings(mock=True) if mock else Settings()
+    if not settings.mock and not settings.llm_api_key:
         print("缺少 LLM_API_KEY：复制 .env.example 为 .env 并填写（见 README）", file=sys.stderr)
         return 2
-    loop = AgentLoop(LLMClient(settings), build_registry(settings), max_turns=max_turns)
+    if settings.mock:
+        from src.agent.mock import MockLLM
+        llm = MockLLM()
+    else:
+        llm = LLMClient(settings)
+    loop = AgentLoop(llm, build_registry(settings), max_turns=max_turns)
     try:
         result = await loop.run(ASK_PROMPT, question)
     except FatalLLMError as e:
@@ -58,13 +69,15 @@ async def run_ask(question: str, max_turns: int) -> int:
     return 0
 
 
-async def run_research_cli(question: str, concurrency: int, config: str = "A1") -> int:
+async def run_research_cli(
+    question: str, concurrency: int, config: str = "A1", mock: bool | None = None
+) -> int:
     from src.agent.orchestrator.run import run_research
     from src.agent.schemas import RunStatus
 
-    settings = Settings()
+    settings = Settings(mock=True) if mock else Settings()
     result = await run_research(
-        question, settings=settings, max_concurrency=concurrency, config=config)
+        question, settings=settings, max_concurrency=concurrency, config=config, mock=mock)
     print(f"◆ 研究计划（{len(result.plan)} 个子问题）:")
     for s in result.plan:
         print(f"  {s.sub_query_id}: {s.question}")
@@ -98,18 +111,23 @@ def main() -> None:
     p_ask = sub.add_parser("ask", help="A0 单 Agent：搜索后作答（消融 baseline）")
     p_ask.add_argument("question")
     p_ask.add_argument("--max-turns", type=int, default=8)
+    p_ask.add_argument("--mock", action="store_true", default=None,
+                       help="mock 模式：固定 LLM/检索，无需 key、不联网（也可 MOCK=1）")
 
     p_res = sub.add_parser("research", help="多 Agent 管线：规划→并行检索→落库")
     p_res.add_argument("question")
     p_res.add_argument("--concurrency", type=int, default=4)
     p_res.add_argument("--config", default="A1", choices=["A1", "A2"],
                        help="消融配置（A2 = Verifier，随 W4 生效）")
+    p_res.add_argument("--mock", action="store_true", default=None,
+                       help="mock 模式：固定 LLM/检索，无需 key、不联网（也可 MOCK=1）")
 
     args = parser.parse_args()
     if args.cmd == "ask":
-        sys.exit(asyncio.run(run_ask(args.question, args.max_turns)))
+        sys.exit(asyncio.run(run_ask(args.question, args.max_turns, args.mock)))
     else:
-        sys.exit(asyncio.run(run_research_cli(args.question, args.concurrency, args.config)))
+        sys.exit(asyncio.run(
+            run_research_cli(args.question, args.concurrency, args.config, args.mock)))
 
 
 if __name__ == "__main__":

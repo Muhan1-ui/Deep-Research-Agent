@@ -6,6 +6,16 @@
 - 数据契约与指标口径：`src/agent/schemas.py`（W0 定稿，口径定义写在文件头注释）
 - 状态：**W6 ✅ 10 题 × A0/A1/A2 消融 + 跨厂商 judge + 校准证据**（结论与威胁效度见 [docs/w6-report.md](./docs/w6-report.md)；第十六轮 A1/A2 复跑受检索配额耗尽污染，判读见 [docs/audit/2026-10-25-schema-probes.md](./docs/audit/2026-10-25-schema-probes.md) §第十六轮）
 
+## 快速验证（不需要 key，无需联网）
+
+```bash
+python -m venv .venv && .venv/Scripts/pip install -e . pytest
+LLM_API_KEY= TAVILY_API_KEY= .venv/Scripts/python.exe -m src.agent research "MCP 协议的核心架构" --config A2 --mock
+```
+
+预期：打印报告路径，报告含 ≥3 条 `[n]` 引用，全程不联网、不需要任何 key。
+mock 走的是与真实链路**同一套校验**（引用完整性、句级锚定、verifier 判定），只把 LLM 与检索换成固定实现。
+
 ## 开发
 
 ```bash

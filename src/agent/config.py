@@ -11,6 +11,12 @@ from pydantic_settings import BaseSettings, SettingsConfigDict
 class Settings(BaseSettings):
     model_config = SettingsConfigDict(env_file=".env", env_file_encoding="utf-8", extra="ignore")
 
+    # ---- 运行模式 ----
+    # mock=True：LLM/搜索/抓取全部换成固定实现（src/agent/mock.py），
+    # 不需要任何 API key、不联网；内部校验（锚定/引用完整性/verifier）照常跑。
+    # 来源：--mock 命令行开关（优先级更高）或 MOCK=1 环境变量。
+    mock: bool = False
+
     # ---- LLM：开发期可切 GLM 免费额度，正式跑批用 DeepSeek ----
     llm_api_key: str = ""
     llm_base_url: str = "https://api.deepseek.com"
